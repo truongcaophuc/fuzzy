@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  Settings, Mic, Square, Upload, Play, Loader2, Wand2, FileAudio,
+  Mic, Square, Upload, Play, Loader2, Wand2, FileAudio,
   CheckCircle2, AlertTriangle, ListTree, Plus, Trash2, GitMerge, Server,
 } from "lucide-react";
 
@@ -125,7 +125,6 @@ export default function App() {
         <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-brand-600 text-white"><FileAudio size={22} /></div>
         <div>
           <h1 className="text-[20px] font-extrabold text-slate-800">STT Studio · Multi-ASR</h1>
-          <p className="text-[12.5px] text-slate-500">Chạy song song nhiều STT + fuzzy chuẩn hoá từng bản (rapidfuzz + unidecode) + gộp</p>
         </div>
       </header>
 
