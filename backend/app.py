@@ -119,11 +119,12 @@ async def transcribe_multi(
     file: UploadFile = File(...),
     asrs: str = Form("[]"),             # JSON: [{name,endpoint,model,api_key,language,prompt}]
     catalog: str = Form("[]"),
+    aliases: str = Form("{}"),          # JSON: {"bọt tre":"Porsche", ...} (cách đọc lơ lớ → tên chuẩn)
     threshold: float = Form(80.0),
     use_unidecode: bool = Form(True),
     normalize: bool = Form(True),
 ):
-    """Gọi SONG SONG nhiều ASR → chuẩn hoá fuzzy TỪNG bản → gộp."""
+    """Gọi SONG SONG nhiều ASR → chuẩn hoá fuzzy + alias TỪNG bản → gộp."""
     audio = await file.read()
     fname = file.filename or "audio.wav"
     ctype = file.content_type or "audio/wav"
@@ -137,6 +138,12 @@ async def transcribe_multi(
         cat = []
     if not isinstance(cat, list):
         cat = []
+    try:
+        alias_map = json.loads(aliases) or {}
+    except json.JSONDecodeError:
+        alias_map = {}
+    if not isinstance(alias_map, dict):
+        alias_map = {}
 
     async with httpx.AsyncClient() as client:
         results = await asyncio.gather(*[
@@ -145,8 +152,8 @@ async def transcribe_multi(
 
     # Chuẩn hoá fuzzy cho TỪNG bản
     for res in results:
-        if normalize and cat and res.get("raw"):
-            norm = normalize_text(res["raw"], cat, threshold=threshold, use_unidecode=use_unidecode)
+        if normalize and (cat or alias_map) and res.get("raw"):
+            norm = normalize_text(res["raw"], cat, threshold=threshold, use_unidecode=use_unidecode, aliases=alias_map)
             res["normalized"] = norm["normalized"]
             res["matches"] = norm["matches"]
         else:
@@ -179,4 +186,5 @@ async def normalize_only(payload: dict):
         payload.get("catalog", []),
         threshold=float(payload.get("threshold", 80.0)),
         use_unidecode=bool(payload.get("use_unidecode", True)),
+        aliases=payload.get("aliases") or {},
     )

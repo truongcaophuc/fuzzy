@@ -6,7 +6,7 @@ import {
 
 interface ASR { id: string; name: string; endpoint: string; model: string; apiKey: string; language: string }
 interface Cfg {
-  asrs: ASR[]; prompt: string; catalog: string;
+  asrs: ASR[]; prompt: string; catalog: string; aliases: string;
   threshold: number; useUnidecode: boolean; normalize: boolean;
 }
 const uid = () => Math.random().toString(36).slice(2, 8);
@@ -16,7 +16,8 @@ const DEFAULT_CFG: Cfg = {
     { id: uid(), name: "v2 · Qwen3-ASR", endpoint: "http://10.120.80.116:8801/v1", model: "Qwen/Qwen3-ASR-1.7B", apiKey: "", language: "vi" },
   ],
   prompt: "",
-  catalog: "Galaxy S24\nGalaxy S24 Ultra\niPhone 15\nSamsung\nMacBook Air\nAirPods Pro",
+  catalog: "Galaxy S24\nGalaxy S24 Ultra\niPhone 15\nSamsung\nMacBook Air\nAirPods Pro\nPorsche",
+  aliases: "bọt tre => Porsche\npọt che => Porsche\nai phôn => iPhone 15\nga lắc xi => Galaxy S24",
   threshold: 80, useUnidecode: true, normalize: true,
 };
 const LS_KEY = "stt-studio-multi-cfg";
@@ -84,11 +85,21 @@ export default function App() {
         name: a.name, endpoint: a.endpoint, model: a.model,
         api_key: a.apiKey, language: a.language, prompt: cfg.prompt,
       }));
-      const catalog = JSON.stringify(cfg.catalog.split("\n").map((s) => s.trim()).filter(Boolean));
+      const catalog = JSON.stringify((cfg.catalog || "").split("\n").map((s) => s.trim()).filter(Boolean));
+      const aliases: Record<string, string> = {};
+      (cfg.aliases || "").split("\n").forEach((line) => {
+        const sep = line.includes("=>") ? "=>" : (line.includes("=") ? "=" : null);
+        if (!sep) return;
+        const idx = line.indexOf(sep);
+        const k = line.slice(0, idx).trim();
+        const v = line.slice(idx + sep.length).trim();
+        if (k && v) aliases[k] = v;
+      });
       const fd = new FormData();
       fd.append("file", blob, blob instanceof File ? blob.name : "recording.webm");
       fd.append("asrs", JSON.stringify(asrs));
       fd.append("catalog", catalog);
+      fd.append("aliases", JSON.stringify(aliases));
       fd.append("threshold", String(cfg.threshold));
       fd.append("use_unidecode", String(cfg.useUnidecode));
       fd.append("normalize", String(cfg.normalize));
@@ -148,6 +159,11 @@ export default function App() {
             <label className="block">
               <span className="mb-1 block text-[12px] font-semibold text-slate-600">Catalog brand/SKU (mỗi dòng 1 mục)</span>
               <textarea value={cfg.catalog} onChange={(e) => set("catalog", e.target.value)} rows={5} className={inputCls} />
+            </label>
+            <label className="block">
+              <span className="mb-1 block text-[12px] font-semibold text-slate-600">Alias — cách đọc lơ lớ → tên chuẩn</span>
+              <textarea value={cfg.aliases} onChange={(e) => set("aliases", e.target.value)} rows={4} placeholder="bọt tre => Porsche" className={inputCls} />
+              <span className="mt-1 block text-[11px] text-slate-400">mỗi dòng: <code>cách đọc =&gt; tên chuẩn</code> — bắt brand tiếng Anh đọc lệch xa mà fuzzy không nhận</span>
             </label>
             <label className="block">
               <span className="mb-1 block text-[12px] font-semibold text-slate-600">Ngưỡng fuzzy: {cfg.threshold}</span>

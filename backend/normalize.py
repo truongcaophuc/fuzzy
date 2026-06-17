@@ -36,28 +36,42 @@ def normalize_text(
     catalog: list[str],
     threshold: float = 80.0,
     use_unidecode: bool = True,
+    aliases: dict | list | None = None,
 ) -> dict:
-    """Trả về {normalized, matches:[Match...]} — text đã sửa + danh sách thay thế."""
-    if not text or not catalog:
+    """Trả về {normalized, matches:[Match...]} — text đã sửa + danh sách thay thế.
+
+    aliases: ánh xạ "cách đọc lơ lớ" -> tên chuẩn, vd {"bọt tre": "Porsche", "ai phôn": "iPhone"}.
+    Alias dùng cho brand tiếng Anh đọc lệch xa (fuzzy không bắt nổi).
+    """
+    if not text or (not catalog and not aliases):
         return {"normalized": text, "matches": []}
 
     words = text.split()
     n = len(words)
-    catalog = [c for c in (c.strip() for c in catalog) if c]
 
-    # Thu thập ứng viên: với mỗi term, thử nhiều kích thước cửa sổ (vì STT tách/gộp từ
-    # khác cách viết catalog). So bằng _key (bỏ dấu + bỏ khoảng trắng).
+    # pairs = (chuỗi-để-SO-KHỚP, chuỗi-THAY-VÀO)
+    pairs: list[tuple[str, str]] = [(c.strip(), c.strip()) for c in catalog if c and c.strip()]
+    if aliases:
+        items = aliases.items() if isinstance(aliases, dict) else aliases
+        for spoken, canonical in items:
+            if spoken and canonical:
+                pairs.append((str(spoken).strip(), str(canonical).strip()))
+
+    # Thu thập ứng viên: với mỗi pair, thử nhiều kích thước cửa sổ (vì STT tách/gộp từ
+    # khác cách viết). So bằng _key (bỏ dấu + bỏ khoảng trắng).
     candidates: list[Match] = []
-    for term in catalog:
-        term_key = _key(term, use_unidecode)
-        kw = len(term.split())
-        max_k = min(n, kw + 2)  # thử tới term_words + 2 từ
+    for target, replacement in pairs:
+        target_key = _key(target, use_unidecode)
+        if not target_key:
+            continue
+        kw = len(target.split())
+        max_k = min(n, kw + 2)  # thử tới target_words + 2 từ
         for k in range(1, max_k + 1):
             for i in range(0, n - k + 1):
                 window = " ".join(words[i:i + k])
-                score = fuzz.ratio(_key(window, use_unidecode), term_key)
+                score = fuzz.ratio(_key(window, use_unidecode), target_key)
                 if score >= threshold:
-                    candidates.append(Match(window, term, round(score, 1), i, k))
+                    candidates.append(Match(window, replacement, round(score, 1), i, k))
 
     # Chọn tham lam: điểm cao trước, không chồng lấn nhau
     candidates.sort(key=lambda m: (-m.score, -m.length))
