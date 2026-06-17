@@ -122,6 +122,7 @@ async def transcribe_multi(
     aliases: str = Form("{}"),          # JSON: {"bọt tre":"Porsche", ...} (cách đọc lơ lớ → tên chuẩn)
     threshold: float = Form(80.0),
     use_unidecode: bool = Form(True),
+    use_phonetic: bool = Form(True),
     normalize: bool = Form(True),
 ):
     """Gọi SONG SONG nhiều ASR → chuẩn hoá fuzzy + alias TỪNG bản → gộp."""
@@ -153,7 +154,7 @@ async def transcribe_multi(
     # Chuẩn hoá fuzzy cho TỪNG bản
     for res in results:
         if normalize and (cat or alias_map) and res.get("raw"):
-            norm = normalize_text(res["raw"], cat, threshold=threshold, use_unidecode=use_unidecode, aliases=alias_map)
+            norm = normalize_text(res["raw"], cat, threshold=threshold, use_unidecode=use_unidecode, aliases=alias_map, use_phonetic=use_phonetic)
             res["normalized"] = norm["normalized"]
             res["matches"] = norm["matches"]
         else:
@@ -187,4 +188,5 @@ async def normalize_only(payload: dict):
         threshold=float(payload.get("threshold", 80.0)),
         use_unidecode=bool(payload.get("use_unidecode", True)),
         aliases=payload.get("aliases") or {},
+        use_phonetic=bool(payload.get("use_phonetic", True)),
     )

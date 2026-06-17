@@ -7,7 +7,7 @@ import {
 interface ASR { id: string; name: string; endpoint: string; model: string; apiKey: string; language: string }
 interface Cfg {
   asrs: ASR[]; prompt: string; catalog: string; aliases: string;
-  threshold: number; useUnidecode: boolean; normalize: boolean;
+  threshold: number; useUnidecode: boolean; usePhonetic: boolean; normalize: boolean;
 }
 const uid = () => Math.random().toString(36).slice(2, 8);
 const DEFAULT_CFG: Cfg = {
@@ -24,7 +24,7 @@ const DEFAULT_CFG: Cfg = {
     "Shopee", "Grab", "Johnson & Johnson", "Walmart", "Visa", "Mastercard", "Disney", "Milo", "Colgate", "Adobe",
   ].join("\n"),
   aliases: "",
-  threshold: 70, useUnidecode: true, normalize: true,
+  threshold: 70, useUnidecode: true, usePhonetic: true, normalize: true,
 };
 const LS_KEY = "stt-studio-multi-cfg";
 
@@ -108,6 +108,7 @@ export default function App() {
       fd.append("aliases", JSON.stringify(aliases));
       fd.append("threshold", String(cfg.threshold));
       fd.append("use_unidecode", String(cfg.useUnidecode));
+      fd.append("use_phonetic", String(cfg.usePhonetic));
       fd.append("normalize", String(cfg.normalize));
       const r = await fetch("/api/transcribe_multi", { method: "POST", body: fd });
       const data = await r.json();
@@ -184,6 +185,7 @@ export default function App() {
             </label>
             <div className="flex gap-5">
               <label className="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" checked={cfg.useUnidecode} onChange={(e) => set("useUnidecode", e.target.checked)} className="h-4 w-4 accent-brand-600" /> Bỏ dấu (unidecode)</label>
+              <label className="flex items-center gap-2 text-sm text-slate-600" title="Đổi cách đọc Việt của âm w/j/f/z về dạng Anh để fuzzy khớp (qua→wa, ph→f, gi→j, d→z...)"><input type="checkbox" checked={cfg.usePhonetic} onChange={(e) => set("usePhonetic", e.target.checked)} className="h-4 w-4 accent-brand-600" /> Phonetic VN→EN</label>
               <label className="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" checked={cfg.normalize} onChange={(e) => set("normalize", e.target.checked)} className="h-4 w-4 accent-brand-600" /> Bật chuẩn hoá</label>
             </div>
           </section>

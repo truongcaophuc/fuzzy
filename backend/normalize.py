@@ -22,6 +22,20 @@ def _key(s: str, use_unidecode: bool) -> str:
     return "".join(_norm(s, use_unidecode).split())
 
 
+# Quy luật back-transliterate VN->EN: tiếng Việt thiếu phụ âm đầu w/j/f/z nên ASR Việt
+# nắn brand tiếng Anh theo các cách viết dưới. Đảo ngược để fuzzy khớp lại.
+# vd: Walmart -> "qua mát"/"oan mát" -> "wamat"/"wanmat" ~ "walmart".
+_PHON_RULES = [("ph", "f"), ("qu", "w"), ("gi", "j"), ("oa", "wa"), ("oe", "we")]
+
+
+def _phon_key(s: str) -> str:
+    """Khoá so khớp PHỤ (phonetic VN->EN). Chỉ dùng để TÍNH ĐIỂM, không đổi text hiển thị."""
+    t = unidecode(s).lower()
+    for a, b in _PHON_RULES:
+        t = t.replace(a, b)
+    return "".join(t.split())
+
+
 @dataclass
 class Match:
     original: str      # cụm gốc trong transcript
@@ -37,6 +51,7 @@ def normalize_text(
     threshold: float = 80.0,
     use_unidecode: bool = True,
     aliases: dict | list | None = None,
+    use_phonetic: bool = True,
 ) -> dict:
     """Trả về {normalized, matches:[Match...]} — text đã sửa + danh sách thay thế.
 
@@ -64,12 +79,16 @@ def normalize_text(
         target_key = _key(target, use_unidecode)
         if not target_key:
             continue
+        target_phon = _phon_key(target) if use_phonetic else None
         kw = len(target.split())
         max_k = min(n, kw + 2)  # thử tới target_words + 2 từ
         for k in range(1, max_k + 1):
             for i in range(0, n - k + 1):
                 window = " ".join(words[i:i + k])
                 score = fuzz.ratio(_key(window, use_unidecode), target_key)
+                if use_phonetic:
+                    # khoá phụ phonetic VN->EN — lấy điểm cao nhất giữa 2 cách so
+                    score = max(score, fuzz.ratio(_phon_key(window), target_phon))
                 if score >= threshold:
                     candidates.append(Match(window, replacement, round(score, 1), i, k))
 
