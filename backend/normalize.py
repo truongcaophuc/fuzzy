@@ -36,6 +36,31 @@ def _phon_key(s: str) -> str:
     return "".join(t.split())
 
 
+# --- Gate "ngoại lai": token KHÔNG hợp âm-vị-học tiếng Việt → nhiều khả năng là từ nước
+# ngoài bị nghe lệch → cho phép nới ngưỡng (không phá tiếng Việt vì từ Việt thật được giữ).
+_BAD_INIT = ("f", "j", "w", "z")                       # tiếng Việt không có phụ âm đầu này
+_VN_FINALS = ("ch", "ng", "nh", "c", "m", "n", "p", "t")  # âm cuối hợp lệ (ngoài nguyên âm)
+_VOWELS = set("aeiouy")
+_FOREIGN_DELTA = 15   # nới ngưỡng bao nhiêu điểm cho cụm ngoại lai
+_FOREIGN_FLOOR = 58   # sàn tối thiểu để tránh match rác
+
+
+def _is_vn_syllable(tok: str) -> bool:
+    t = unidecode(tok).lower().strip()
+    if not t:
+        return True
+    if t[0] in _BAD_INIT:
+        return False
+    if t[-1] not in _VOWELS and not any(t.endswith(c) for c in _VN_FINALS):
+        return False
+    return True
+
+
+def _window_is_foreign(window: str) -> bool:
+    """Cụm có chứa ÍT NHẤT 1 token không-phải-tiếng-Việt → coi là ngoại lai."""
+    return any(not _is_vn_syllable(t) for t in window.split())
+
+
 @dataclass
 class Match:
     original: str      # cụm gốc trong transcript
@@ -89,7 +114,12 @@ def normalize_text(
                 if use_phonetic:
                     # khoá phụ phonetic VN->EN — lấy điểm cao nhất giữa 2 cách so
                     score = max(score, fuzz.ratio(_phon_key(window), target_phon))
-                if score >= threshold:
+                # Gate ngoại lai: cụm chứa token không-phải-tiếng-Việt → nới ngưỡng
+                # (từ tiếng Việt thật giữ ngưỡng gốc → không bị sửa nhầm).
+                eff = threshold
+                if use_phonetic and _window_is_foreign(window):
+                    eff = max(_FOREIGN_FLOOR, threshold - _FOREIGN_DELTA)
+                if score >= eff:
                     candidates.append(Match(window, replacement, round(score, 1), i, k))
 
     # Chọn tham lam: điểm cao trước, không chồng lấn nhau
