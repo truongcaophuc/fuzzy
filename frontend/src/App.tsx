@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  Mic, Square, Upload, Play, Loader2, Wand2, FileAudio,
+  Mic, Square, Upload, Play, Loader2, Wand2, FileAudio, RotateCcw,
   CheckCircle2, AlertTriangle, ListTree, Plus, Trash2, GitMerge, Server,
 } from "lucide-react";
 
@@ -126,6 +126,14 @@ export default function App() {
         <div>
           <h1 className="text-[20px] font-extrabold text-slate-800">STT Studio · Multi-ASR</h1>
         </div>
+        <div className="flex-1" />
+        <button
+          onClick={() => { if (confirm("Khôi phục toàn bộ cấu hình về mặc định?")) { localStorage.removeItem(LS_KEY); setCfg(DEFAULT_CFG); } }}
+          className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-2 text-[12.5px] font-semibold text-slate-600 hover:bg-slate-50"
+          title="Xoá cấu hình đã lưu, nạp lại mặc định (50 brand, ngưỡng 70, alias trống)"
+        >
+          <RotateCcw size={14} /> Khôi phục mặc định
+        </button>
       </header>
 
       <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
