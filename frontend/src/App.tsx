@@ -16,9 +16,15 @@ const DEFAULT_CFG: Cfg = {
     { id: uid(), name: "v2 · Qwen3-ASR", endpoint: "http://10.120.80.116:8801/v1", model: "Qwen/Qwen3-ASR-1.7B", apiKey: "", language: "vi" },
   ],
   prompt: "",
-  catalog: "Galaxy S24\nGalaxy S24 Ultra\niPhone 15\nSamsung\nMacBook Air\nAirPods Pro\nPorsche",
-  aliases: "bọt tre => Porsche\npọt che => Porsche\nai phôn => iPhone 15\nga lắc xi => Galaxy S24",
-  threshold: 80, useUnidecode: true, normalize: true,
+  catalog: [
+    "Apple", "Microsoft", "Google", "Amazon", "Netflix", "Intel", "Oracle", "Cisco", "Salesforce", "IBM",
+    "Coca-Cola", "Pepsi", "Starbucks", "McDonald's", "KFC", "Burger King", "Subway", "Domino's", "Heineken", "Red Bull",
+    "Nike", "Adidas", "Puma", "Under Armour", "Levi's", "Calvin Klein", "Tommy Hilfiger", "Ralph Lauren", "Victoria's Secret", "New Balance",
+    "Ford", "Chevrolet", "Tesla", "Boeing", "Caterpillar", "Harley-Davidson", "Goodyear", "Uber", "FedEx", "DHL",
+    "Shopee", "Grab", "Johnson & Johnson", "Walmart", "Visa", "Mastercard", "Disney", "Milo", "Colgate", "Adobe",
+  ].join("\n"),
+  aliases: "",
+  threshold: 70, useUnidecode: true, normalize: true,
 };
 const LS_KEY = "stt-studio-multi-cfg";
 
@@ -237,7 +243,6 @@ export default function App() {
         </div>
       </div>
 
-      <footer className="mt-6 flex items-center justify-center gap-1.5 text-[11.5px] text-slate-400"><Settings size={12} /> backend FastAPI :8077 · fuzzy = rapidfuzz + unidecode · multi-ASR song song</footer>
     </div>
   );
 }
