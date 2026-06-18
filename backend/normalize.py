@@ -36,29 +36,79 @@ def _phon_key(s: str) -> str:
     return "".join(t.split())
 
 
-# --- Gate "ngoại lai": token KHÔNG hợp âm-vị-học tiếng Việt → nhiều khả năng là từ nước
-# ngoài bị nghe lệch → cho phép nới ngưỡng (không phá tiếng Việt vì từ Việt thật được giữ).
-_BAD_INIT = ("f", "j", "w", "z")                       # tiếng Việt không có phụ âm đầu này
-_VN_FINALS = ("ch", "ng", "nh", "c", "m", "n", "p", "t")  # âm cuối hợp lệ (ngoài nguyên âm)
-_VOWELS = set("aeiouy")
+# --- Gate "ngoại lai": token KHÔNG phải âm tiết tiếng Việt CÓ THẬT → nhiều khả năng là từ
+# nước ngoài bị nghe lệch → cho phép nới ngưỡng (không phá tiếng Việt vì âm tiết thật giữ nguyên).
+#
+# Cách phát hiện: tra TỪ ĐIỂN ÂM TIẾT (giữ nguyên dấu) — chính xác hơn luật âm-vị-học cũ.
+#   vd "địa"/"chia"/"gút" ∈ từ điển -> tiếng Việt thật (giữ); "dia"/"good"/"gết" ∉ -> ngoại lai.
+# Phải GIỮ DẤU mới phân biệt được "địa"(có thật) với "dia"(year nghe nhầm, không có thật).
+import os
+
 _FOREIGN_DELTA = 15   # nới ngưỡng bao nhiêu điểm cho cụm ngoại lai
 _FOREIGN_FLOOR = 58   # sàn tối thiểu để tránh match rác
+_ALIAS_THRESHOLD = 88  # alias là chuỗi khai báo chính xác -> ngưỡng CAO (gần tuyệt đối),
+                       # tránh leak: alias "gusia" KHÔNG được dính "già/gửi/gia" (~75đ)
+
+# Fallback (nếu thiếu file từ điển): luật âm-vị-học cũ.
+_BAD_INIT = ("f", "j", "w", "z")
+_VN_FINALS = ("ch", "ng", "nh", "c", "m", "n", "p", "t")
+_VOWELS = set("aeiouy")
+
+
+def _load_syllables() -> set[str]:
+    path = os.path.join(os.path.dirname(__file__), "vn_syllables.txt")
+    try:
+        with open(path, encoding="utf-8") as f:
+            return {ln.strip().lower() for ln in f if ln.strip()}
+    except OSError:
+        return set()
+
+
+_VN_SYLLABLES = _load_syllables()
 
 
 def _is_vn_syllable(tok: str) -> bool:
-    t = unidecode(tok).lower().strip()
+    t = tok.lower().strip(".,!?;:\"'()[]")
     if not t:
         return True
-    if t[0] in _BAD_INIT:
+    if _VN_SYLLABLES:                       # có từ điển -> tra trực tiếp (giữ dấu)
+        return t in _VN_SYLLABLES
+    # fallback âm-vị-học (khi thiếu file từ điển)
+    u = unidecode(t)
+    if u and u[0] in _BAD_INIT:
         return False
-    if t[-1] not in _VOWELS and not any(t.endswith(c) for c in _VN_FINALS):
+    if u and u[-1] not in _VOWELS and not any(u.endswith(c) for c in _VN_FINALS):
         return False
     return True
 
 
 def _window_is_foreign(window: str) -> bool:
-    """Cụm có chứa ÍT NHẤT 1 token không-phải-tiếng-Việt → coi là ngoại lai."""
+    """Cụm có chứa ÍT NHẤT 1 token không-phải-âm-tiết-tiếng-Việt → coi là ngoại lai."""
     return any(not _is_vn_syllable(t) for t in window.split())
+
+
+def best_match_score(text: str, target: str, use_unidecode: bool = True, use_phonetic: bool = True) -> float:
+    """Điểm fuzzy CAO NHẤT giữa `target` và mọi cửa sổ con của `text` (KHÔNG áp ngưỡng).
+    Dùng để HIỂN THỊ độ gần — kể cả khi không đủ điểm để khớp."""
+    if not text or not target:
+        return 0.0
+    words = text.split()
+    n = len(words)
+    tk = _key(target, use_unidecode)
+    if not n or not tk:
+        return 0.0
+    tp = _phon_key(target) if use_phonetic else None
+    max_k = min(n, len(target.split()) + 2)
+    best = 0.0
+    for k in range(1, max_k + 1):
+        for i in range(0, n - k + 1):
+            win = " ".join(words[i:i + k])
+            s = fuzz.ratio(_key(win, use_unidecode), tk)
+            if use_phonetic:
+                s = max(s, fuzz.ratio(_phon_key(win), tp))
+            if s > best:
+                best = s
+    return round(best, 1)
 
 
 @dataclass
@@ -89,18 +139,19 @@ def normalize_text(
     words = text.split()
     n = len(words)
 
-    # pairs = (chuỗi-để-SO-KHỚP, chuỗi-THAY-VÀO)
-    pairs: list[tuple[str, str]] = [(c.strip(), c.strip()) for c in catalog if c and c.strip()]
+    # pairs = (chuỗi-để-SO-KHỚP, chuỗi-THAY-VÀO, is_alias)
+    # catalog: fuzzy ngưỡng thường + gate ngoại lai. alias: ngưỡng CAO cố định (không gate).
+    pairs: list[tuple[str, str, bool]] = [(c.strip(), c.strip(), False) for c in catalog if c and c.strip()]
     if aliases:
         items = aliases.items() if isinstance(aliases, dict) else aliases
         for spoken, canonical in items:
             if spoken and canonical:
-                pairs.append((str(spoken).strip(), str(canonical).strip()))
+                pairs.append((str(spoken).strip(), str(canonical).strip(), True))
 
     # Thu thập ứng viên: với mỗi pair, thử nhiều kích thước cửa sổ (vì STT tách/gộp từ
     # khác cách viết). So bằng _key (bỏ dấu + bỏ khoảng trắng).
     candidates: list[Match] = []
-    for target, replacement in pairs:
+    for target, replacement, is_alias in pairs:
         target_key = _key(target, use_unidecode)
         if not target_key:
             continue
@@ -114,11 +165,19 @@ def normalize_text(
                 if use_phonetic:
                     # khoá phụ phonetic VN->EN — lấy điểm cao nhất giữa 2 cách so
                     score = max(score, fuzz.ratio(_phon_key(window), target_phon))
-                # Gate ngoại lai: cụm chứa token không-phải-tiếng-Việt → nới ngưỡng
-                # (từ tiếng Việt thật giữ ngưỡng gốc → không bị sửa nhầm).
-                eff = threshold
-                if use_phonetic and _window_is_foreign(window):
-                    eff = max(_FOREIGN_FLOOR, threshold - _FOREIGN_DELTA)
+                # Alias: ngưỡng CAO cố định (khớp gần tuyệt đối, không gate) → không leak.
+                if is_alias:
+                    eff = _ALIAS_THRESHOLD
+                else:
+                    # Catalog — Gate ngoại lai: cụm chứa token không-phải-tiếng-Việt → nới ngưỡng
+                    # (từ tiếng Việt thật giữ ngưỡng gốc → không bị sửa nhầm).
+                    # GUARD: chỉ nới khi cụm đủ dài so với brand — token ngắn (vd "dia" 3 ký tự)
+                    # hạ ngưỡng sẽ match nhầm brand bất kỳ (Adidas...) → giữ ngưỡng gốc cho cụm ngắn.
+                    eff = threshold
+                    if use_phonetic and _window_is_foreign(window):
+                        wk = _key(window, use_unidecode)
+                        if len(wk) >= 4 and len(wk) >= 0.6 * len(target_key):
+                            eff = max(_FOREIGN_FLOOR, threshold - _FOREIGN_DELTA)
                 if score >= eff:
                     candidates.append(Match(window, replacement, round(score, 1), i, k))
 
