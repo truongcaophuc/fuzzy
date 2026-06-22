@@ -3,12 +3,14 @@ import {
   Mic, Square, Upload, Play, Loader2, Wand2, FileAudio, RotateCcw,
   CheckCircle2, AlertTriangle, ListTree, Plus, Trash2, GitMerge, Server,
   ListChecks, Volume2, XCircle, Download, RefreshCw, X, Maximize2,
+  Settings, LayoutGrid, AlignJustify, Calculator, Sparkles,
 } from "lucide-react";
 
 interface ASR { id: string; name: string; endpoint: string; model: string; apiKey: string; language: string }
 interface Cfg {
   asrs: ASR[]; prompt: string; catalog: string; aliases: string;
   threshold: number; useUnidecode: boolean; usePhonetic: boolean; normalize: boolean;
+  llmEnable: boolean; llmMode: string; llmBaseUrl: string; llmModel: string; llmApiKey: string;
   ttsBaseUrl: string; ttsModel: string; ttsVoice: string; ttsSpeed: number; ttsNumStep: number;
   atList: string;
 }
@@ -54,7 +56,9 @@ const DEFAULT_CFG: Cfg = {
     "Shopee", "Grab", "Johnson & Johnson", "Walmart", "Visa", "Mastercard", "Disney", "Milo", "Colgate", "Adobe",
   ].join("\n"),
   aliases: "",
-  threshold: 70, useUnidecode: true, usePhonetic: true, normalize: true,
+  threshold: 75, useUnidecode: true, usePhonetic: true, normalize: true,
+  llmEnable: false, llmMode: "verify", llmBaseUrl: "http://10.120.80.3:5000",
+  llmModel: "gemma-4-26B-A4B-it-AWQ-4bit", llmApiKey: "",
   ttsBaseUrl: "http://10.120.80.116:6655", ttsModel: "omnivoice", ttsVoice: "nu_ai", ttsSpeed: 1, ttsNumStep: 11,
   atList: AT_SAMPLE,
 };
@@ -63,9 +67,11 @@ const LS_KEY = "stt-studio-multi-cfg";
 interface Match { original: string; replaced: string; score: number }
 interface Res { name: string; raw: string; normalized: string; matches: Match[]; latency_ms: number; error?: string; expected_score?: number }
 interface Merged { text: string; agreed: boolean; method: string; primary: string | null }
+interface Candidate { brand: string; span: string; score: number }
 interface AtItem {
   expected: string; text: string; results: Res[]; merged: Merged | null;
   pass: boolean; matched_in: string[]; error?: string; audio_b64?: string; best_score?: number;
+  candidates?: Candidate[]; llm_action?: string; merged_raw?: string; fuzzy_suggest?: string;
 }
 interface AtSummary { total: number; passed: number; pass_rate: number }
 
@@ -94,6 +100,24 @@ function parseList(raw: string): { expected: string; text: string }[] {
     if (expected && text) out.push({ expected, text });
   });
   return out;
+}
+// như parseList nhưng GIỮ item text rỗng (cho grid editor) + KHÔNG trim text
+// (trim sẽ xoá dấu cách cuối ngay khi gõ → không gõ được space). Chỉ bỏ 1 space của " => ".
+function parseListGrid(raw: string): { expected: string; text: string }[] {
+  const out: { expected: string; text: string }[] = [];
+  (raw || "").split("\n").forEach((line) => {
+    if (!line.trim() || line.trimStart().startsWith("#")) return;
+    const sep = line.includes("=>") ? "=>" : (line.includes("=") ? "=" : null);
+    if (!sep) { out.push({ expected: line.replace(/^\s+/, ""), text: "" }); return; }
+    const idx = line.indexOf(sep);
+    const expected = line.slice(0, idx).replace(/^\s+/, "").replace(/ $/, "");
+    const text = line.slice(idx + sep.length).replace(/^ /, "");
+    if (expected) out.push({ expected, text });
+  });
+  return out;
+}
+function joinListGrid(items: { expected: string; text: string }[]): string {
+  return items.map((x) => `${x.expected} => ${x.text}`).join("\n");
 }
 function parseAliases(raw: string): Record<string, string> {
   const aliases: Record<string, string> = {};
@@ -133,7 +157,12 @@ export default function App() {
   const addAsr = () => setCfg((c) => ({ ...c, asrs: [...c.asrs, { id: uid(), name: `ASR ${c.asrs.length + 1}`, endpoint: "", model: "", apiKey: "", language: "vi" }] }));
   const delAsr = (id: string) => setCfg((c) => ({ ...c, asrs: c.asrs.filter((a) => a.id !== id) }));
 
-  const [mode, setMode] = useState<"transcribe" | "autotest">("transcribe");
+  const [mode, setMode] = useState<"transcribe" | "autotest" | "settings" | "fuzzy">("autotest");
+  const [listView, setListView] = useState<"grid" | "text">("grid");
+  const [ftText, setFtText] = useState("anh đi ra ngoài mua qua mát");
+  const [ftResult, setFtResult] = useState<{ raw: string; fuzzy: string; matches: Match[]; candidates: Candidate[]; llm_action: string; final: string; llm_pick?: string | null; llm_note?: string | null } | null>(null);
+  const [ftRunning, setFtRunning] = useState(false);
+  const [ftError, setFtError] = useState("");
 
   const [blob, setBlob] = useState<Blob | null>(null);
   const [audioUrl, setAudioUrl] = useState("");
@@ -142,6 +171,9 @@ export default function App() {
   const [error, setError] = useState("");
   const [results, setResults] = useState<Res[] | null>(null);
   const [merged, setMerged] = useState<Merged | null>(null);
+  const [tcCandidates, setTcCandidates] = useState<Candidate[]>([]);
+  const [tcAction, setTcAction] = useState<string>("");
+  const [tcLlm, setTcLlm] = useState<{ pick?: string | null; note?: string | null }>({});
   const recRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
 
@@ -176,6 +208,8 @@ export default function App() {
     catalog: (cfg.catalog || "").split("\n").map((s) => s.trim()).filter(Boolean),
     aliases: parseAliases(cfg.aliases),
     threshold: cfg.threshold, use_unidecode: cfg.useUnidecode, use_phonetic: cfg.usePhonetic, normalize: cfg.normalize,
+    use_llm: cfg.llmEnable, llm_mode: cfg.llmMode,
+    llm: { base_url: cfg.llmBaseUrl, model: cfg.llmModel, api_key: cfg.llmApiKey },
   });
 
   const transcribe = async () => {
@@ -193,10 +227,15 @@ export default function App() {
       fd.append("use_unidecode", String(cfg.useUnidecode));
       fd.append("use_phonetic", String(cfg.usePhonetic));
       fd.append("normalize", String(cfg.normalize));
+      fd.append("use_llm", String(cfg.llmEnable));
+      fd.append("llm_mode", cfg.llmMode);
+      fd.append("llm", JSON.stringify(common.llm));
       const r = await fetch("/api/transcribe_multi", { method: "POST", body: fd });
       const data = await r.json();
       if (!r.ok) throw new Error(data.detail || "Lỗi không rõ");
       setResults(data.results); setMerged(data.merged);
+      setTcCandidates(data.candidates || []); setTcAction(data.llm_action || "");
+      setTcLlm({ pick: data.llm_pick, note: data.llm_note });
     } catch (e) { setError(e instanceof Error ? e.message : "Transcribe thất bại"); }
     finally { setLoading(false); }
   };
@@ -281,6 +320,33 @@ export default function App() {
     a.download = "autotest_results.csv"; a.click();
   };
 
+  // ----- grid editor cho list test -----
+  const listItems = parseListGrid(cfg.atList);
+  const updateListItem = (i: number, field: "expected" | "text", val: string) => {
+    const items = parseListGrid(cfg.atList);
+    if (!items[i]) return;
+    items[i] = { ...items[i], [field]: val };
+    set("atList", joinListGrid(items));
+  };
+  const removeListItem = (i: number) => set("atList", joinListGrid(parseListGrid(cfg.atList).filter((_, j) => j !== i)));
+  const addListItem = () => set("atList", joinListGrid([...parseListGrid(cfg.atList), { expected: "Brand mới", text: "" }]));
+
+  const runFuzzyText = async () => {
+    if (!ftText.trim()) { setFtError("Nhập text trước."); return; }
+    setFtRunning(true); setFtError(""); setFtResult(null);
+    try {
+      const common = buildPayloadCommon();
+      const r = await fetch("/api/fuzzy_text", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: ftText, catalog: common.catalog, aliases: common.aliases, threshold: cfg.threshold, use_unidecode: cfg.useUnidecode, use_phonetic: cfg.usePhonetic, use_llm: common.use_llm, llm_mode: common.llm_mode, llm: common.llm }),
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.detail || "Lỗi");
+      setFtResult(data);
+    } catch (e) { setFtError(e instanceof Error ? e.message : "Tính fuzzy thất bại"); }
+    finally { setFtRunning(false); }
+  };
+
   const inputCls = "w-full rounded-lg border border-slate-200 px-3 py-2 text-sm outline-none focus:border-brand-500";
   const itemCount = parseList(cfg.atList).length;
 
@@ -301,7 +367,7 @@ export default function App() {
 
       {/* ===== TABS ===== */}
       <div className="mb-5 flex gap-1 rounded-xl bg-slate-100 p-1">
-        {([["transcribe", "Transcribe", Mic], ["autotest", "Auto Test (TTS→STT)", ListChecks]] as const).map(([m, label, Icon]) => (
+        {([["autotest", "Auto Test (TTS→STT)", ListChecks], ["transcribe", "Transcribe", Mic], ["fuzzy", "Fuzzy (text)", Calculator], ["settings", "Cài đặt", Settings]] as const).map(([m, label, Icon]) => (
           <button key={m} onClick={() => setMode(m)}
             className={`flex flex-1 items-center justify-center gap-2 rounded-lg py-2 text-[13.5px] font-bold transition ${mode === m ? "bg-white text-brand-700 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}>
             <Icon size={16} /> {label}
@@ -309,9 +375,8 @@ export default function App() {
         ))}
       </div>
 
-      <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
-        {/* ===== CỘT TRÁI: CẤU HÌNH (dùng chung) ===== */}
-        <div className="space-y-5">
+      {mode === "settings" && (
+      <div className="grid gap-5 lg:grid-cols-2">
           <section className="space-y-3 rounded-2xl bg-white p-5 shadow-sm">
             <div className="flex items-center justify-between">
               <h2 className="flex items-center gap-2 text-[15px] font-bold text-slate-700"><Server size={17} /> Các model ASR ({cfg.asrs.length})</h2>
@@ -352,7 +417,7 @@ export default function App() {
               <span className="mt-1 block text-[11px] text-slate-400">mỗi dòng: <code>cách đọc =&gt; tên chuẩn</code> — bắt brand tiếng Anh đọc lệch xa mà fuzzy không nhận</span>
             </label>
             <label className="block">
-              <span className="mb-1 block text-[12px] font-semibold text-slate-600">Ngưỡng fuzzy: {cfg.threshold}</span>
+              <span className="mb-1 block text-[12px] font-semibold text-slate-600">Ngưỡng fuzzy = ngưỡng auto-commit: {cfg.threshold} <span className="font-normal text-slate-400">(cả fuzzy thô lẫn gating dùng chung)</span></span>
               <input type="range" min={50} max={100} value={cfg.threshold} onChange={(e) => set("threshold", Number(e.target.value))} className="w-full accent-brand-600" />
             </label>
             <div className="flex gap-5">
@@ -361,12 +426,57 @@ export default function App() {
               <label className="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" checked={cfg.normalize} onChange={(e) => set("normalize", e.target.checked)} className="h-4 w-4 accent-brand-600" /> Bật chuẩn hoá</label>
             </div>
           </section>
-        </div>
+          {/* ===== LLM arbiter ===== */}
+          <section className="space-y-3 rounded-2xl bg-white p-5 shadow-sm lg:col-span-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h2 className="flex items-center gap-2 text-[15px] font-bold text-slate-700"><Sparkles size={17} /> LLM arbiter — phân định brand theo ngữ cảnh (đồng âm)</h2>
+              <label className="flex items-center gap-2 text-sm font-semibold text-slate-600"><input type="checkbox" checked={cfg.llmEnable} onChange={(e) => set("llmEnable", e.target.checked)} className="h-4 w-4 accent-brand-600" /> Bật LLM</label>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <label className="block">
+                <span className="mb-1 block text-[12px] font-semibold text-slate-600">Chế độ</span>
+                <select value={cfg.llmMode} onChange={(e) => set("llmMode", e.target.value)} className={inputCls}>
+                  <option value="smart">smart — chỉ hỏi LLM ca chưa-chắc (nhanh, ca auto chốt thẳng)</option>
+                  <option value="verify">verify — LLM kiểm CẢ ca auto (bắt đồng âm điểm cao: qua mặt→Walmart)</option>
+                </select>
+              </label>
+              <label className="block">
+                <span className="mb-1 block text-[12px] font-semibold text-slate-600">Model</span>
+                <input value={cfg.llmModel} onChange={(e) => set("llmModel", e.target.value)} placeholder="gemma-4-26B-A4B-it-AWQ-4bit" className={inputCls} />
+              </label>
+              <label className="block">
+                <span className="mb-1 block text-[12px] font-semibold text-slate-600">Base URL (OpenAI-compatible)</span>
+                <input value={cfg.llmBaseUrl} onChange={(e) => set("llmBaseUrl", e.target.value)} placeholder="http://10.120.80.3:5000" className={inputCls} />
+              </label>
+              <label className="block">
+                <span className="mb-1 block text-[12px] font-semibold text-slate-600">API Key</span>
+                <input value={cfg.llmApiKey} onChange={(e) => set("llmApiKey", e.target.value)} type="password" placeholder="sk-..." className={inputCls} />
+              </label>
+            </div>
+            <span className="block text-[11px] text-slate-400">Chỉ gọi LLM khi có ứng viên brand (không phải mọi câu). <b>verify</b> chậm hơn (~0.5s/lần) nhưng bắt được đồng âm điểm cao mà fuzzy chịu thua.</span>
+          </section>
+          {/* ===== TTS (popthink/OmniVoice) ===== */}
+          <section className="space-y-3 rounded-2xl bg-white p-5 shadow-sm lg:col-span-2">
+            <h2 className="flex items-center gap-2 text-[15px] font-bold text-slate-700"><Volume2 size={17} /> Cấu hình TTS (popthink / OmniVoice) — dùng cho Auto Test</h2>
+            <input value={cfg.ttsBaseUrl} onChange={(e) => set("ttsBaseUrl", e.target.value)} placeholder="http://10.120.80.116:6655" className={inputCls} />
+            <div className="grid gap-2 sm:grid-cols-2">
+              <input value={cfg.ttsModel} onChange={(e) => set("ttsModel", e.target.value)} placeholder="omnivoice" className={inputCls} />
+              <select value={cfg.ttsVoice} onChange={(e) => set("ttsVoice", e.target.value)} className={inputCls}>
+                {TTS_VOICES.map((v) => <option key={v.id} value={v.id}>{v.name}</option>)}
+              </select>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <label className="block"><span className="mb-1 block text-[12px] font-semibold text-slate-600">Tốc độ audio (gửi STT): {cfg.ttsSpeed}× <span className="font-normal text-slate-400">(time-stretch, giữ cao độ)</span></span>
+                <input type="range" min={0.5} max={2} step={0.1} value={cfg.ttsSpeed} onChange={(e) => set("ttsSpeed", Number(e.target.value))} className="w-full accent-brand-600" /></label>
+              <label className="block"><span className="mb-1 block text-[12px] font-semibold text-slate-600">Num step: {cfg.ttsNumStep}</span>
+                <input type="range" min={6} max={32} value={cfg.ttsNumStep} onChange={(e) => set("ttsNumStep", Number(e.target.value))} className="w-full accent-brand-600" /></label>
+            </div>
+          </section>
+      </div>
+      )}
 
-        {/* ===== CỘT PHẢI ===== */}
-        <div className="space-y-5">
-          {mode === "transcribe" ? (
-            <>
+      {mode === "transcribe" && (
+        <div className="mx-auto max-w-3xl space-y-5">
               <section className="space-y-3 rounded-2xl bg-white p-5 shadow-sm">
                 <h2 className="flex items-center gap-2 text-[15px] font-bold text-slate-700"><Mic size={17} /> Audio</h2>
                 <div className="flex gap-3">
@@ -394,6 +504,17 @@ export default function App() {
                       : <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[11px] text-amber-700">KHÁC NHAU → bỏ phiếu</span>}
                   </div>
                   <div className="rounded-lg bg-white p-3 text-[14px] leading-relaxed text-slate-800">{merged.text || <em className="text-slate-400">(rỗng)</em>}</div>
+                  {tcAction && tcAction !== "auto" && tcCandidates.length > 0 && (
+                    <div className="mt-2 flex flex-wrap items-center gap-1 text-[12px]">
+                      <span className="font-semibold text-amber-600">chưa chốt — ứng viên:</span>
+                      {tcCandidates.map((c, j) => <span key={j} className="rounded bg-violet-50 px-1.5 py-0.5 text-violet-700" title={`khớp cụm "${c.span}"`}>{c.brand} {c.score}</span>)}
+                    </div>
+                  )}
+                  {(tcLlm.pick || tcLlm.note) && (
+                    <div className="mt-2 flex items-center gap-1.5 text-[12px] text-fuchsia-700"><Sparkles size={13} />
+                      {tcLlm.pick ? <>LLM chọn: <b>{tcLlm.pick}</b></> : <>LLM: <b>không có brand</b></>}
+                    </div>
+                  )}
                   {merged.primary && <div className="mt-1 text-[11.5px] text-slate-500">Hệ trọng số cao nhất (phá hoà phiếu): {merged.primary}</div>}
                 </section>
               )}
@@ -423,45 +544,95 @@ export default function App() {
                   )}
                 </section>
               ))}
-            </>
-          ) : (
-            <>
-              {/* ===== AUTO TEST ===== */}
-              <section className="space-y-3 rounded-2xl bg-white p-5 shadow-sm">
-                <h2 className="flex items-center gap-2 text-[15px] font-bold text-slate-700"><Volume2 size={17} /> Cấu hình TTS (popthink / OmniVoice)</h2>
-                <input value={cfg.ttsBaseUrl} onChange={(e) => set("ttsBaseUrl", e.target.value)} placeholder="http://10.120.80.116:6655" className={inputCls} />
-                <div className="grid grid-cols-2 gap-2">
-                  <input value={cfg.ttsModel} onChange={(e) => set("ttsModel", e.target.value)} placeholder="omnivoice" className={inputCls} />
-                  <select value={cfg.ttsVoice} onChange={(e) => set("ttsVoice", e.target.value)} className={inputCls}>
-                    {TTS_VOICES.map((v) => <option key={v.id} value={v.id}>{v.name}</option>)}
-                  </select>
-                </div>
-                <div className="grid grid-cols-2 gap-3">
-                  <label className="block"><span className="mb-1 block text-[12px] font-semibold text-slate-600">Tốc độ audio (gửi STT): {cfg.ttsSpeed}× <span className="font-normal text-slate-400">(time-stretch, giữ cao độ)</span></span>
-                    <input type="range" min={0.5} max={2} step={0.1} value={cfg.ttsSpeed} onChange={(e) => set("ttsSpeed", Number(e.target.value))} className="w-full accent-brand-600" /></label>
-                  <label className="block"><span className="mb-1 block text-[12px] font-semibold text-slate-600">Num step: {cfg.ttsNumStep}</span>
-                    <input type="range" min={6} max={32} value={cfg.ttsNumStep} onChange={(e) => set("ttsNumStep", Number(e.target.value))} className="w-full accent-brand-600" /></label>
-                </div>
-              </section>
+        </div>
+      )}
 
-              <section className="space-y-3 rounded-2xl bg-white p-5 shadow-sm">
-                <div className="flex items-center justify-between">
-                  <h2 className="flex items-center gap-2 text-[15px] font-bold text-slate-700"><ListChecks size={17} /> List test ({itemCount} mục)</h2>
-                  <div className="flex gap-2">
-                    <label className="cursor-pointer rounded-lg border border-slate-200 px-2.5 py-1.5 text-[12px] font-semibold text-slate-600 hover:bg-slate-50">
-                      <Upload size={13} className="mr-1 inline" />Upload
-                      <input type="file" accept=".txt,.csv,.md" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) f.text().then((t) => set("atList", t)); }} />
-                    </label>
-                    <button onClick={() => set("atList", AT_SAMPLE)} className="rounded-lg border border-slate-200 px-2.5 py-1.5 text-[12px] font-semibold text-slate-600 hover:bg-slate-50">Mẫu 50 brand</button>
-                  </div>
+      {mode === "fuzzy" && (
+        <div className="mx-auto max-w-3xl space-y-5">
+          <section className="space-y-3 rounded-2xl bg-white p-5 shadow-sm">
+            <h2 className="flex items-center gap-2 text-[15px] font-bold text-slate-700"><Calculator size={17} /> Tính điểm Fuzzy (gõ text, không cần audio)</h2>
+            <textarea value={ftText} onChange={(e) => setFtText(e.target.value)} rows={3} placeholder="Gõ/dán câu (như STT trả về) để xem fuzzy chấm brand gì…" className={inputCls} />
+            <span className="block text-[11px] text-slate-400">Dùng <b>Catalog + Alias + ngưỡng + phonetic</b> ở tab <b>Cài đặt</b>. Mô phỏng đúng việc fuzzy làm với 1 chuỗi.</span>
+            <button onClick={runFuzzyText} disabled={ftRunning || !ftText.trim()} className="flex w-full items-center justify-center gap-2 rounded-lg bg-brand-600 py-3 text-[15px] font-bold text-white hover:bg-brand-700 disabled:opacity-50">
+              {ftRunning ? <><Loader2 size={18} className="animate-spin" /> Đang tính…</> : <><Calculator size={18} /> Tính fuzzy</>}
+            </button>
+            {ftError && <div className="flex items-start gap-2 rounded-lg bg-rose-50 p-3 text-[13px] text-rose-600"><AlertTriangle size={16} className="mt-0.5 shrink-0" /> {ftError}</div>}
+          </section>
+
+          {ftResult && (
+            <section className="space-y-3 rounded-2xl bg-white p-5 shadow-sm">
+              <div><div className="mb-1 text-[11px] font-bold uppercase tracking-wide text-slate-400">Thô (input)</div>
+                <div className="rounded-lg bg-slate-50 p-2.5 text-[13.5px] text-slate-700">{ftResult.raw}</div></div>
+              <div><div className="mb-1 flex items-center gap-1 text-[11px] font-bold uppercase tracking-wide text-emerald-600"><CheckCircle2 size={12} /> Kết quả (sau gating @{cfg.threshold})</div>
+                <div className="rounded-lg bg-emerald-50/50 p-2.5 text-[13.5px] text-slate-800">{ftResult.final === ftResult.raw ? ftResult.final : <Highlight text={ftResult.final} matches={ftResult.matches} />}</div></div>
+              {ftResult.final !== ftResult.fuzzy && ftResult.fuzzy !== ftResult.raw && (
+                <div className="text-[11.5px] text-amber-600">⚠ fuzzy muốn sửa thành "<b>{ftResult.fuzzy}</b>" nhưng gating giữ lại (chưa đủ tin).</div>
+              )}
+              {ftResult.matches.length > 0 && ftResult.final !== ftResult.raw && (
+                <div className="flex flex-wrap items-center gap-1 text-[11.5px] text-slate-500"><ListTree size={13} /> khớp:
+                  {ftResult.matches.map((m, j) => <span key={j} className="rounded bg-slate-100 px-1.5 py-0.5"><span className="text-rose-500 line-through">{m.original}</span>→<b className="text-emerald-700">{m.replaced}</b> {m.score}</span>)}
                 </div>
-                <textarea value={cfg.atList} onChange={(e) => set("atList", e.target.value)} rows={8} placeholder="Goodyear => gút dia&#10;Walmart => qua mát" className={`${inputCls} font-mono text-[12.5px]`} />
-                <span className="block text-[11px] text-slate-400">mỗi dòng: <code>Brand kỳ vọng =&gt; câu chứa phiên âm</code> (nên bọc brand trong câu ~5 từ — Qwen nhận tốt hơn từ đơn). App gọi TTS đọc câu → {cfg.asrs.length} ASR → tìm brand trong kết quả.</span>
-                <button onClick={runAutotest} disabled={atRunning || !itemCount} className="flex w-full items-center justify-center gap-2 rounded-lg bg-brand-600 py-3 text-[15px] font-bold text-white hover:bg-brand-700 disabled:opacity-50">
-                  {atRunning ? <><Loader2 size={18} className="animate-spin" /> Đang test {itemCount} mục (TTS→STT)…</> : <><Play size={18} /> Chạy auto-test {itemCount} mục</>}
-                </button>
-                {atError && <div className="flex items-start gap-2 rounded-lg bg-rose-50 p-3 text-[13px] text-rose-600"><AlertTriangle size={16} className="mt-0.5 shrink-0" /> {atError}</div>}
-              </section>
+              )}
+              <div>
+                <div className="mb-1 flex items-center gap-2 text-[11px] font-bold uppercase tracking-wide text-violet-500">Ứng viên (đã lọc)
+                  <span className={`rounded px-1.5 py-0.5 text-[10px] ${ftResult.llm_action === "auto" ? "bg-emerald-100 text-emerald-700" : ftResult.llm_action === "llm" ? "bg-amber-100 text-amber-700" : "bg-slate-100 text-slate-500"}`}>{ftResult.llm_action === "auto" ? "AUTO (commit)" : ftResult.llm_action === "llm" ? "→ LLM (giữ)" : "skip"}</span>
+                </div>
+                {ftResult.candidates.length > 0
+                  ? <div className="flex flex-wrap gap-1">{ftResult.candidates.map((c, j) => <span key={j} className="rounded bg-violet-50 px-1.5 py-0.5 text-[12px] text-violet-700" title={`cụm "${c.span}"`}>{c.brand} <b>{c.score}</b></span>)}</div>
+                  : <span className="text-[12px] text-slate-400">— không có ứng viên ≥ 50</span>}
+              </div>
+              {(ftResult.llm_pick || ftResult.llm_note) && (
+                <div className="flex items-center gap-1.5 rounded-lg bg-fuchsia-50 p-2 text-[12px] text-fuchsia-700"><Sparkles size={13} className="shrink-0" />
+                  {ftResult.llm_pick ? <>LLM chọn: <b>{ftResult.llm_pick}</b></> : <>LLM: <b>không có brand</b> → giữ nguyên câu</>}
+                </div>
+              )}
+            </section>
+          )}
+        </div>
+      )}
+
+      {mode === "autotest" && (
+        <div className="space-y-5">
+          <section className="space-y-3 rounded-2xl bg-white p-5 shadow-sm">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h2 className="flex items-center gap-2 text-[15px] font-bold text-slate-700"><ListChecks size={17} /> List test ({itemCount} mục)</h2>
+              <div className="flex flex-wrap gap-2">
+                <div className="flex overflow-hidden rounded-lg border border-slate-200">
+                  <button onClick={() => setListView("grid")} className={`flex items-center gap-1 px-2.5 py-1.5 text-[12px] font-semibold ${listView === "grid" ? "bg-brand-50 text-brand-700" : "text-slate-500"}`}><LayoutGrid size={13} /> Lưới</button>
+                  <button onClick={() => setListView("text")} className={`flex items-center gap-1 px-2.5 py-1.5 text-[12px] font-semibold ${listView === "text" ? "bg-brand-50 text-brand-700" : "text-slate-500"}`}><AlignJustify size={13} /> Văn bản</button>
+                </div>
+                <label className="cursor-pointer rounded-lg border border-slate-200 px-2.5 py-1.5 text-[12px] font-semibold text-slate-600 hover:bg-slate-50">
+                  <Upload size={13} className="mr-1 inline" />Upload
+                  <input type="file" accept=".txt,.csv,.md" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) f.text().then((t) => set("atList", t)); }} />
+                </label>
+                <button onClick={() => set("atList", AT_SAMPLE)} className="rounded-lg border border-slate-200 px-2.5 py-1.5 text-[12px] font-semibold text-slate-600 hover:bg-slate-50">Mẫu 50 brand</button>
+              </div>
+            </div>
+            {listView === "grid" ? (
+              <>
+                <div className="grid max-h-[460px] grid-cols-1 gap-2 overflow-auto pr-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                  {listItems.map((it, i) => (
+                    <div key={i} className="rounded-lg border border-slate-200 p-2 hover:border-slate-300">
+                      <div className="mb-1 flex items-center gap-1">
+                        <span className="text-[10px] font-bold text-slate-300">{i + 1}</span>
+                        <input value={it.expected} onChange={(e) => updateListItem(i, "expected", e.target.value)} className="min-w-0 flex-1 bg-transparent text-[12.5px] font-bold text-slate-700 outline-none" />
+                        <button onClick={() => removeListItem(i)} title="Xoá" className="text-slate-300 hover:text-rose-500"><X size={12} /></button>
+                      </div>
+                      <input value={it.text} onChange={(e) => updateListItem(i, "text", e.target.value)} placeholder="câu chứa phiên âm…" className="w-full rounded border border-slate-200 px-1.5 py-1 text-[12px] italic outline-none focus:border-brand-500" />
+                    </div>
+                  ))}
+                </div>
+                <button onClick={addListItem} className="flex items-center gap-1 rounded-lg border border-dashed border-slate-300 px-3 py-1.5 text-[12.5px] font-semibold text-slate-500 hover:border-brand-400 hover:text-brand-600"><Plus size={14} /> Thêm mục</button>
+              </>
+            ) : (
+              <textarea value={cfg.atList} onChange={(e) => set("atList", e.target.value)} rows={10} placeholder="Goodyear => gút dia&#10;Walmart => qua mát" className={`${inputCls} font-mono text-[12.5px]`} />
+            )}
+            <span className="block text-[11px] text-slate-400">mỗi mục: <code>Brand kỳ vọng → câu chứa phiên âm</code> (bọc brand trong câu ~5 từ — Qwen nhận tốt hơn từ đơn). TTS đọc → {cfg.asrs.length} ASR → tìm brand.</span>
+            <button onClick={runAutotest} disabled={atRunning || !itemCount} className="flex w-full items-center justify-center gap-2 rounded-lg bg-brand-600 py-3 text-[15px] font-bold text-white hover:bg-brand-700 disabled:opacity-50">
+              {atRunning ? <><Loader2 size={18} className="animate-spin" /> Đang test {itemCount} mục (TTS→STT)…</> : <><Play size={18} /> Chạy auto-test {itemCount} mục</>}
+            </button>
+            {atError && <div className="flex items-start gap-2 rounded-lg bg-rose-50 p-3 text-[13px] text-rose-600"><AlertTriangle size={16} className="mt-0.5 shrink-0" /> {atError}</div>}
+          </section>
 
               {atSummary && (
                 <section className="rounded-2xl border-2 border-brand-200 bg-brand-50/40 p-5">
@@ -511,7 +682,19 @@ export default function App() {
                                     {r.expected_score !== undefined && !r.error && <span className="text-slate-300">[{r.expected_score}]</span>}
                                   </div>
                                 ))}
-                                {it.merged && <div className="flex gap-1"><span className="text-brand-400">gộp:</span><b className={it.pass ? "text-emerald-700" : "text-slate-700"}>{it.merged.text || "∅"}</b></div>}
+                                {it.merged && (it.llm_action === "auto"
+                                  ? <div className="flex gap-1"><span className="text-brand-400">gộp:</span><b className={it.pass ? "text-emerald-700" : "text-slate-700"}>{it.merged.text || "∅"}</b></div>
+                                  : <div className="flex flex-wrap gap-1"><span className="text-brand-400">gộp:</span><b className="text-slate-700">{it.merged.text || "∅"}</b>{it.candidates && it.candidates.length > 0 && <span className="text-amber-500">— chưa chốt, xem ứng viên ↓</span>}</div>
+                                )}
+                                {it.candidates && it.candidates.length > 0 && (
+                                  <div className="flex flex-wrap items-center gap-1 pt-0.5">
+                                    <span className="text-violet-400">ứng viên:</span>
+                                    {it.candidates.map((c, j) => (
+                                      <span key={j} className={`rounded px-1 ${c.brand === it.expected ? "bg-emerald-100 font-semibold text-emerald-700" : "bg-violet-50 text-violet-700"}`} title={`khớp cụm "${c.span}"`}>{c.brand} {c.score}</span>
+                                    ))}
+                                    {it.llm_action && <span className={`rounded px-1 text-[10px] font-bold ${it.llm_action === "auto" ? "bg-emerald-100 text-emerald-700" : it.llm_action === "llm" ? "bg-amber-100 text-amber-700" : "bg-slate-100 text-slate-500"}`}>{it.llm_action === "auto" ? "fuzzy chắc" : it.llm_action === "llm" ? "→ LLM" : "skip"}</span>}
+                                  </div>
+                                )}
                               </div>
                             )}
                           </td>
@@ -529,10 +712,8 @@ export default function App() {
                   </table>
                 </section>
               )}
-            </>
-          )}
         </div>
-      </div>
+      )}
 
       {/* ===== POPUP EDITOR phiên âm ===== */}
       {editIdx !== null && atItems && atItems[editIdx] && (
