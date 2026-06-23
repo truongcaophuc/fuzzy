@@ -550,9 +550,8 @@ export default function App() {
       {mode === "fuzzy" && (
         <div className="mx-auto max-w-3xl space-y-5">
           <section className="space-y-3 rounded-2xl bg-white p-5 shadow-sm">
-            <h2 className="flex items-center gap-2 text-[15px] font-bold text-slate-700"><Calculator size={17} /> Tính điểm Fuzzy (gõ text, không cần audio)</h2>
+            <h2 className="flex items-center gap-2 text-[15px] font-bold text-slate-700"><Calculator size={17} /> Tính điểm Fuzzy</h2>
             <textarea value={ftText} onChange={(e) => setFtText(e.target.value)} rows={3} placeholder="Gõ/dán câu (như STT trả về) để xem fuzzy chấm brand gì…" className={inputCls} />
-            <span className="block text-[11px] text-slate-400">Dùng <b>Catalog + Alias + ngưỡng + phonetic</b> ở tab <b>Cài đặt</b>. Mô phỏng đúng việc fuzzy làm với 1 chuỗi.</span>
             <button onClick={runFuzzyText} disabled={ftRunning || !ftText.trim()} className="flex w-full items-center justify-center gap-2 rounded-lg bg-brand-600 py-3 text-[15px] font-bold text-white hover:bg-brand-700 disabled:opacity-50">
               {ftRunning ? <><Loader2 size={18} className="animate-spin" /> Đang tính…</> : <><Calculator size={18} /> Tính fuzzy</>}
             </button>
