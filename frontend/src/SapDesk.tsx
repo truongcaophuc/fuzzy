@@ -18,8 +18,8 @@ interface HandoffEvent {
 
 const SUMMARY_HEADERS = ["REASON", "AGENT ACTIONS", "RESOLUTION", "KEY INFORMATION"];
 const SECTION_META: Record<string, { label: string; icon: ReactNode; accent: string }> = {
-  REASON: { label: "Lý do gọi", icon: <Flag className="h-4 w-4" />, accent: "border-blue-500 text-blue-700" },
-  "AGENT ACTIONS": { label: "AI đã làm", icon: <ListChecks className="h-4 w-4" />, accent: "border-indigo-500 text-indigo-700" },
+  REASON: { label: "Vấn đề liên hệ", icon: <Flag className="h-4 w-4" />, accent: "border-blue-500 text-blue-700" },
+  "AGENT ACTIONS": { label: "BOT đã hỗ trợ", icon: <ListChecks className="h-4 w-4" />, accent: "border-indigo-500 text-indigo-700" },
   RESOLUTION: { label: "Hướng xử lý", icon: <CheckCircle2 className="h-4 w-4" />, accent: "border-emerald-500 text-emerald-700" },
   "KEY INFORMATION": { label: "Thông tin then chốt", icon: <KeyRound className="h-4 w-4" />, accent: "border-amber-500 text-amber-700" },
 };
