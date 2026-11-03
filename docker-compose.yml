@@ -4,6 +4,8 @@ services:
     restart: unless-stopped
     expose:
       - "8077"
+    volumes:
+      - ./backend/data:/app/data   # handoffs.json — giữ hàng đợi SAP qua restart/rebuild
 
   frontend:
     build: ./frontend

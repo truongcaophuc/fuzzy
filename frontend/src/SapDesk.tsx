@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 import {
   PhoneIncoming, PhoneCall, Hash, Clock, Tag, Activity,
   FileText, MessagesSquare, X, Inbox, Crown,
-  ListChecks, Flag, CheckCircle2, KeyRound, ChevronRight,
+  ListChecks, Flag, CheckCircle2, KeyRound, ChevronRight, Trash2,
 } from "lucide-react";
 
 // ── Poptech · Mô phỏng màn hình SAP của điện thoại viên ────────────────────
@@ -337,7 +337,36 @@ export default function SapDesk() {
   const [pop, setPop] = useState<HandoffEvent | null>(null);
   const [answered, setAnswered] = useState<Set<string>>(new Set());
   const [now, setNow] = useState(() => new Date().toLocaleTimeString("vi-VN"));
+  const [menu, setMenu] = useState<{ x: number; y: number; id: string } | null>(null);
   const seen = useRef<Set<string>>(new Set());
+
+  // Đóng menu chuột phải khi click ra ngoài / cuộn / Esc.
+  useEffect(() => {
+    if (!menu) return;
+    const close = () => setMenu(null);
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && close();
+    window.addEventListener("click", close);
+    window.addEventListener("scroll", close, true);
+    window.addEventListener("resize", close);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("resize", close);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [menu]);
+
+  /** Bỏ các id khỏi state cục bộ (dùng cho cả xoá tại chỗ lẫn event SSE từ tab khác). */
+  const removeLocal = (ids: string[] | "all") => {
+    const gone = (id: string) => ids === "all" || ids.includes(id);
+    setItems((prev) => {
+      const next = prev.filter((e) => !gone(e.id));
+      setActiveId((cur) => (cur && !gone(cur) ? cur : next[0]?.id ?? null));
+      return next;
+    });
+    setPop((p) => (p && gone(p.id) ? null : p));
+  };
 
   // Đồng hồ header.
   useEffect(() => {
@@ -360,7 +389,10 @@ export default function SapDesk() {
     const es = new EventSource("/api/handoff/stream");
     es.onmessage = (msg) => {
       try {
-        const ev: HandoffEvent = JSON.parse(msg.data);
+        const data = JSON.parse(msg.data);
+        if (data.type === "deleted") return removeLocal(data.ids || []);
+        if (data.type === "cleared") return removeLocal("all");
+        const ev: HandoffEvent = data;
         if (seen.current.has(ev.id)) return;
         seen.current.add(ev.id);
         setItems((prev) => [ev, ...prev]);
@@ -379,6 +411,21 @@ export default function SapDesk() {
   const answer = (id: string) => {
     setAnswered((s) => new Set(s).add(id));
     setPop(null);
+  };
+
+  const deleteOne = async (id: string) => {
+    setMenu(null);
+    const r = await fetch(`/api/handoff/${encodeURIComponent(id)}`, { method: "DELETE" }).catch(() => null);
+    if (r && (r.ok || r.status === 404)) removeLocal([id]);
+    else alert("Xoá thất bại — kiểm tra kết nối backend.");
+  };
+
+  const deleteAll = async () => {
+    setMenu(null);
+    if (!confirm(`Xoá toàn bộ ${items.length} cuộc gọi trong hàng đợi?`)) return;
+    const r = await fetch("/api/handoff", { method: "DELETE" }).catch(() => null);
+    if (r?.ok) removeLocal("all");
+    else alert("Xoá thất bại — kiểm tra kết nối backend.");
   };
 
   return (
@@ -429,6 +476,11 @@ export default function SapDesk() {
                   <li key={e.id}>
                     <button
                       onClick={() => setActiveId(e.id)}
+                      onContextMenu={(ev) => {
+                        ev.preventDefault();
+                        ev.stopPropagation();
+                        setMenu({ x: ev.clientX, y: ev.clientY, id: e.id });
+                      }}
                       className={`flex w-full cursor-pointer items-center gap-3 rounded-lg px-2.5 py-2.5 text-left transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300 ${
                         isActive ? "bg-blue-50 ring-1 ring-blue-200" : "hover:bg-slate-50"
                       }`}
@@ -486,6 +538,35 @@ export default function SapDesk() {
           )}
         </main>
       </div>
+
+      {/* Menu chuột phải trên hàng đợi */}
+      {menu && (
+        <div
+          role="menu"
+          onClick={(e) => e.stopPropagation()}
+          onContextMenu={(e) => e.preventDefault()}
+          className="fixed z-40 min-w-[180px] overflow-hidden rounded-lg border border-slate-200 bg-white py-1 text-sm shadow-lg"
+          style={{
+            left: Math.min(menu.x, window.innerWidth - 196),
+            top: Math.min(menu.y, window.innerHeight - 88),
+          }}
+        >
+          <button
+            role="menuitem"
+            onClick={() => deleteOne(menu.id)}
+            className="flex w-full cursor-pointer items-center gap-2 px-3 py-2 text-left text-slate-700 hover:bg-slate-100"
+          >
+            <Trash2 className="h-4 w-4" /> Xoá cuộc gọi này
+          </button>
+          <button
+            role="menuitem"
+            onClick={deleteAll}
+            className="flex w-full cursor-pointer items-center gap-2 px-3 py-2 text-left text-red-600 hover:bg-red-50"
+          >
+            <Trash2 className="h-4 w-4" /> Xoá tất cả ({items.length})
+          </button>
+        </div>
+      )}
 
       {/* Screen-pop */}
       {pop && (

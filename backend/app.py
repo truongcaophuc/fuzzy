@@ -46,7 +46,43 @@ async def health():
 # bắt đầu chuyển máy. Ta lưu lại + đẩy real-time (SSE) cho màn hình SAP đang mở, để
 # điện thoại viên thấy tóm tắt/transcript TRƯỚC khi nhấc máy.
 
-_HANDOFFS: deque = deque(maxlen=50)            # lịch sử handoff gần nhất (mới → cũ)
+_HANDOFF_MAX = 50
+_HANDOFF_FILE = os.environ.get(
+    "HANDOFF_STORE", os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "handoffs.json"))
+
+
+def _load_handoffs() -> deque:
+    """Nạp lịch sử từ file JSON (mới → cũ); file hỏng/thiếu → bắt đầu rỗng."""
+    try:
+        with open(_HANDOFF_FILE, encoding="utf-8") as f:
+            items = json.load(f)
+        if isinstance(items, list):
+            return deque(items, maxlen=_HANDOFF_MAX)
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        print(f"[handoff] không đọc được {_HANDOFF_FILE}: {e}")
+    return deque(maxlen=_HANDOFF_MAX)
+
+
+def _save_handoffs() -> None:
+    """Ghi atomic (tmp → replace) để không để lại file JSON dở dang nếu bị kill giữa chừng."""
+    os.makedirs(os.path.dirname(_HANDOFF_FILE), exist_ok=True)
+    tmp = _HANDOFF_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(list(_HANDOFFS), f, ensure_ascii=False, indent=2)
+    os.replace(tmp, _HANDOFF_FILE)
+
+
+def _broadcast(event: dict) -> None:
+    for q in list(_HANDOFF_SUBS):              # fan-out, không chặn nếu queue đầy
+        try:
+            q.put_nowait(event)
+        except asyncio.QueueFull:
+            pass
+
+
+_HANDOFFS: deque = _load_handoffs()            # lịch sử handoff gần nhất (mới → cũ), lưu ở _HANDOFF_FILE
 _HANDOFF_SUBS: set[asyncio.Queue] = set()      # subscribers SSE đang mở
 
 
@@ -67,11 +103,8 @@ async def receive_handoff(request: Request):
         "payload": payload,
     }
     _HANDOFFS.appendleft(event)
-    for q in list(_HANDOFF_SUBS):              # fan-out, không chặn nếu queue đầy
-        try:
-            q.put_nowait(event)
-        except asyncio.QueueFull:
-            pass
+    _save_handoffs()
+    _broadcast(event)
     return {"ok": True, "id": event["id"]}
 
 
@@ -79,6 +112,29 @@ async def receive_handoff(request: Request):
 async def list_handoffs():
     """Lịch sử handoff gần nhất (mới → cũ) — để màn hình SAP nạp lúc mở."""
     return {"items": list(_HANDOFFS)}
+
+
+@app.delete("/api/handoff/{handoff_id}")
+async def delete_handoff(handoff_id: str):
+    """Xoá một handoff khỏi hàng đợi; báo các màn hình SAP khác qua SSE."""
+    before = len(_HANDOFFS)
+    kept = [e for e in _HANDOFFS if e.get("id") != handoff_id]
+    if len(kept) == before:
+        raise HTTPException(404, "handoff không tồn tại")
+    _HANDOFFS.clear()
+    _HANDOFFS.extend(kept)
+    _save_handoffs()
+    _broadcast({"type": "deleted", "ids": [handoff_id]})
+    return {"ok": True}
+
+
+@app.delete("/api/handoff")
+async def clear_handoffs():
+    """Xoá toàn bộ hàng đợi."""
+    _HANDOFFS.clear()
+    _save_handoffs()
+    _broadcast({"type": "cleared"})
+    return {"ok": True}
 
 
 @app.get("/api/handoff/stream")
