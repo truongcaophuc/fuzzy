@@ -1,10 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { ReactNode } from "react";
+import { PhoneIncoming, PhoneCall, X, Inbox, Trash2, Palette, Settings } from "lucide-react";
 import {
-  PhoneIncoming, PhoneCall, Hash, Clock, Tag, Activity,
-  FileText, MessagesSquare, X, Inbox, Crown,
-  ListChecks, Flag, CheckCircle2, KeyRound, ChevronRight, Trash2,
-} from "lucide-react";
+  SAMPLE_PAYLOAD, STARTER_TEMPLATE, buildDocument, renderTemplate, templateData,
+} from "./handoffTemplate";
 
 // ── Poptech · Mô phỏng màn hình SAP của điện thoại viên ────────────────────
 // Nhận warm-handoff từ Dograh qua SSE (/api/handoff/stream) và "screen-pop" ngữ
@@ -16,14 +14,6 @@ interface HandoffEvent {
   payload: Record<string, unknown>;
 }
 
-const SUMMARY_HEADERS = ["REASON", "AGENT ACTIONS", "RESOLUTION", "KEY INFORMATION"];
-const SECTION_META: Record<string, { label: string; icon: ReactNode; accent: string }> = {
-  REASON: { label: "Vấn đề liên hệ", icon: <Flag className="h-4 w-4" />, accent: "border-blue-500 text-blue-700" },
-  "AGENT ACTIONS": { label: "BOT đã hỗ trợ", icon: <ListChecks className="h-4 w-4" />, accent: "border-indigo-500 text-indigo-700" },
-  RESOLUTION: { label: "Hướng xử lý", icon: <CheckCircle2 className="h-4 w-4" />, accent: "border-emerald-500 text-emerald-700" },
-  "KEY INFORMATION": { label: "Thông tin then chốt", icon: <KeyRound className="h-4 w-4" />, accent: "border-amber-500 text-amber-700" },
-};
-
 /** Lấy field đầu tiên tồn tại trong payload (hỗ trợ nhiều tên khoá). */
 function pick(payload: Record<string, unknown>, keys: string[]): string {
   for (const k of keys) {
@@ -31,47 +21,6 @@ function pick(payload: Record<string, unknown>, keys: string[]): string {
     if (v !== undefined && v !== null && String(v).trim() !== "") return String(v);
   }
   return "";
-}
-
-/** Tách tóm tắt theo header REASON / AGENT ACTIONS / RESOLUTION / KEY INFORMATION. */
-function parseSummary(text: string): { header: string; lines: string[] }[] {
-  if (!text) return [];
-  const re = new RegExp(`^\\s*(${SUMMARY_HEADERS.join("|")})\\s*:?\\s*$`, "i");
-  const rawLines = text.split(/\r?\n/);
-  const sections: { header: string; lines: string[] }[] = [];
-  let cur: { header: string; lines: string[] } | null = null;
-  for (const line of rawLines) {
-    const m = line.match(re);
-    if (m) {
-      cur = { header: m[1].toUpperCase(), lines: [] };
-      sections.push(cur);
-    } else if (cur && line.trim()) {
-      cur.lines.push(line.trim());
-    }
-  }
-  if (sections.length === 0) return [{ header: "", lines: text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean) }];
-  return sections;
-}
-
-/** Tách transcript thành từng dòng bong bóng, giữ NGUYÊN văn (gồm cả biến thể
- *  ASR "[V1]: ...", "[V2]: ..."). Dòng không có tiền tố speaker được coi là nối
- *  tiếp người nói của dòng trước (vd "[V2]:" sau "Customer: [V1]:") → đúng phía. */
-function parseTranscript(text: string): { isCustomer: boolean; text: string }[] {
-  if (!text) return [];
-  const out: { isCustomer: boolean; text: string }[] = [];
-  let lastIsCustomer = true; // dòng đầu chưa rõ speaker → coi là khách
-  for (const raw of text.split(/\r?\n/)) {
-    const l = raw.trim();
-    if (!l) continue;
-    const m = l.match(/^(Customer|Agent|Khách|ĐTV|Bot|AI)\s*:\s*(.*)$/i);
-    if (m) {
-      lastIsCustomer = /customer|khách/i.test(m[1]);
-      out.push({ isCustomer: lastIsCustomer, text: m[2] });
-    } else {
-      out.push({ isCustomer: lastIsCustomer, text: l });
-    }
-  }
-  return out;
 }
 
 /** Suy ra một trường (tên / SĐT) từ phần KEY INFORMATION của summary khi payload
@@ -134,197 +83,199 @@ function Avatar({ name, tone, size = "md" }: { name: string; tone: Tone; size?: 
   );
 }
 
-function SentimentGauge({ value }: { value: string }) {
-  const s = sentimentInfo(value);
-  const c = TONE_CLS[s.tone];
+/** The call detail drawn from a user template: sandboxed (no scripts, no network), sized to its content. */
+function TemplateFrame({ template, ev, title }: { template: string; ev: HandoffEvent; title: string }) {
+  const doc = useMemo(
+    () => buildDocument(renderTemplate(template, templateData(ev.payload || {}, ev.received_at))),
+    [template, ev],
+  );
+  const frame = useRef<HTMLIFrameElement>(null);
+  const observer = useRef<ResizeObserver | null>(null);
+  const [height, setHeight] = useState(240);
+  useEffect(() => () => observer.current?.disconnect(), []);
+  const fit = () => {
+    const root = frame.current?.contentDocument?.documentElement;
+    if (root) setHeight(Math.max(80, root.scrollHeight));
+  };
   return (
-    <div className={`min-w-[140px] rounded-lg ${c.bg} px-3 py-2`}>
-      <div className="mb-1 flex items-center justify-between">
-        <span className={`flex items-center gap-1 text-xs font-semibold ${c.text}`}>
-          <Activity className="h-3.5 w-3.5" /> {s.label}
-        </span>
-        <span className={`text-xs font-mono font-semibold ${c.text}`}>{s.raw}</span>
-      </div>
-      <div className="h-1.5 w-full overflow-hidden rounded-full bg-white/70">
-        <div className={`h-full rounded-full ${c.bar} transition-all duration-300`} style={{ width: `${s.pct}%` }} />
-      </div>
-    </div>
+    <iframe
+      ref={frame}
+      title={title}
+      // allow-same-origin without allow-scripts: nothing in the template runs; the desk can still
+      // read the content height to size the frame.
+      sandbox="allow-same-origin"
+      srcDoc={doc}
+      onLoad={() => {
+        fit();
+        observer.current?.disconnect();
+        const body = frame.current?.contentDocument?.body;
+        if (body && "ResizeObserver" in window) {
+          observer.current = new ResizeObserver(fit);
+          observer.current.observe(body);
+        }
+      }}
+      style={{ height }}
+      className="block w-full border-0 bg-transparent"
+    />
   );
 }
 
-function StatCard({ icon, label, value }: { icon: ReactNode; label: string; value: string }) {
+function RawPayload({ payload }: { payload: Record<string, unknown> }) {
   return (
-    <div className="rounded-lg border border-slate-200 bg-white px-3 py-2">
-      <div className="flex items-center gap-1 text-[11px] font-medium uppercase tracking-wide text-slate-400">
-        {icon} {label}
-      </div>
-      <div className="mt-0.5 truncate font-mono text-sm font-semibold text-slate-800" title={value}>
-        {value || "—"}
-      </div>
-    </div>
+    <details className="text-xs text-slate-500">
+      <summary className="cursor-pointer select-none rounded px-1 py-0.5 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300">
+        Payload thô (JSON)
+      </summary>
+      <pre className="mt-2 max-h-48 overflow-auto rounded-lg bg-slate-900 p-3 text-[11px] leading-relaxed text-slate-100">
+        {JSON.stringify(payload, null, 2)}
+      </pre>
+    </details>
   );
 }
 
-function SummaryLine({ text }: { text: string }) {
-  const bullet = /^[-•*]\s*/.test(text);
-  if (bullet) {
-    return (
-      <li className="flex gap-2 text-sm leading-relaxed text-slate-700">
-        <span className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-slate-300" />
-        <span>{text.replace(/^[-•*]\s*/, "")}</span>
-      </li>
-    );
-  }
-  return <p className="text-sm leading-relaxed text-slate-700">{text}</p>;
-}
-
-function HandoffDetail({ ev }: { ev: HandoffEvent }) {
-  const p = ev.payload || {};
-  const extension = pick(p, ["extension", "destination", "ext"]);
-  const callId = pick(p, ["call_id", "callId", "workflow_run_id", "id"]);
-  const tier = pick(p, ["tier", "rank", "segment"]);
-  const intent = pick(p, ["intent", "reason_code", "topic"]);
-  const sentiment = pick(p, ["sentiment", "sentiment_score", "emotion"]);
-  const summary = pick(p, ["summary", "ai_summary", "handoff_summary"]);
-  const transcript = pick(p, ["transcript", "partial_transcript", "conversation"]);
-  // Field cấu trúc ưu tiên; nếu trống thì suy ra từ KEY INFORMATION của summary.
-  const customer =
-    pick(p, ["customer", "customer_name", "name", "caller"]) ||
-    deriveFromSummary(summary, ["Tên khách hàng", "Khách hàng", "Họ tên", "Tên"]);
-  const phone =
-    pick(p, ["phone", "phone_number", "msisdn"]) ||
-    deriveFromSummary(summary, ["Số điện thoại", "SĐT", "Điện thoại", "Số liên hệ"]);
-
-  const sections = useMemo(() => parseSummary(summary), [summary]);
-  const turns = useMemo(() => parseTranscript(transcript), [transcript]);
-  const tone = sentimentInfo(sentiment).tone;
-
-  const known = new Set([
-    "extension", "destination", "ext", "call_id", "callId", "workflow_run_id", "id",
-    "customer", "customer_name", "name", "caller", "phone", "phone_number", "msisdn",
-    "tier", "rank", "segment", "intent", "reason_code", "topic", "sentiment",
-    "sentiment_score", "emotion", "summary", "ai_summary", "handoff_summary",
-    "transcript", "partial_transcript", "conversation",
-  ]);
-  const extras = Object.entries(p).filter(([k, v]) => !known.has(k) && v !== null && v !== "");
-
+/** The call detail is always a template: the saved one, else the starter template. */
+function HandoffDetail({ ev, template }: { ev: HandoffEvent; template: string }) {
   return (
     <div className="space-y-4">
-      {/* Hồ sơ khách hàng */}
-      <div className="flex items-center gap-3">
-        <Avatar name={customer || "?"} tone={tone} size="lg" />
-        <div className="min-w-0">
-          <div className="flex items-center gap-2">
-            <h2 className="truncate text-lg font-bold text-slate-900">{customer || "Khách chưa định danh"}</h2>
-            {tier && (
-              <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-700">
-                <Crown className="h-3 w-3" /> {tier}
-              </span>
-            )}
+      <TemplateFrame template={template.trim() || STARTER_TEMPLATE} ev={ev} title="Chi tiết cuộc gọi" />
+      <RawPayload payload={ev.payload || {}} />
+    </div>
+  );
+}
+
+/**
+ * Editor for the call-detail template: HTML on the left, live preview on the right (the call shown
+ * in the desk, or a sample when there is none), the values it can use as clickable chips. It opens
+ * on the template in use (the starter template while none is saved). Saving applies it to every open
+ * desk; "Khôi phục mẫu gốc" drops the saved template so every desk goes back to the starter.
+ */
+// When the sample payload is previewed it is shown as received when the desk was opened.
+const SAMPLE_RECEIVED_AT = Date.now() / 1000;
+
+function TemplateEditor({ initial, previewEv, onClose }: { initial: string; previewEv: HandoffEvent | null; onClose: () => void }) {
+  const inUse = initial.trim() || STARTER_TEMPLATE;
+  const [html, setHtml] = useState(inUse);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const area = useRef<HTMLTextAreaElement>(null);
+  const sample = useMemo<HandoffEvent>(
+    () => previewEv ?? { id: "sample", received_at: SAMPLE_RECEIVED_AT, payload: SAMPLE_PAYLOAD },
+    [previewEv],
+  );
+  const keys = useMemo(() => Object.keys(templateData(sample.payload, sample.received_at)).sort(), [sample]);
+  const dirty = html !== inUse;
+  const close = () => (!dirty || confirm("Bỏ các thay đổi chưa lưu?")) && onClose();
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && !dirty && onClose();
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [dirty, onClose]);
+
+  const insert = (text: string) => {
+    const el = area.current;
+    if (!el) return setHtml((h) => h + text);
+    const { selectionStart: a, selectionEnd: b } = el;
+    const next = html.slice(0, a) + text + html.slice(b);
+    setHtml(next);
+    requestAnimationFrame(() => {
+      el.focus();
+      el.setSelectionRange(a + text.length, a + text.length);
+    });
+  };
+
+  const save = async (value: string) => {
+    setSaving(true);
+    setError(null);
+    try {
+      const r = await fetch("/api/handoff/template", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ html: value }),
+      });
+      if (!r.ok) throw new Error((await r.json().catch(() => null))?.detail || `HTTP ${r.status}`);
+      onClose();
+    } catch (e) {
+      setError(`Lưu thất bại: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-sm" role="dialog" aria-modal="true" aria-label="Tùy chỉnh giao diện chi tiết cuộc gọi">
+      <div className="flex h-full max-h-[92vh] w-full max-w-7xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl ring-1 ring-black/5">
+        <div className="flex items-center justify-between bg-[#0a2540] px-5 py-3 text-white">
+          <div className="leading-tight">
+            <div className="text-sm font-bold">Tùy chỉnh giao diện chi tiết cuộc gọi</div>
+            <div className="text-[11px] text-white/60">
+              HTML + CSS · dùng {"{{key}}"} cho giá trị, {"{{#list}}…{{.}}…{{/list}}"} để lặp, {"{{^key}}…{{/key}}"} khi trống · áp dụng cho mọi màn hình
+            </div>
           </div>
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-slate-500">
-            {phone && <span className="flex items-center gap-1"><PhoneCall className="h-3 w-3" /> {phone}</span>}
-            {extension && <span className="flex items-center gap-1"><Hash className="h-3 w-3" /> Ext {extension}</span>}
-            {intent && (
-              <span className="inline-flex items-center gap-1 rounded-full bg-blue-100 px-2 py-0.5 font-medium text-blue-700">
-                <Tag className="h-3 w-3" /> {intent}
-              </span>
-            )}
+          <button onClick={close} aria-label="Đóng" className="cursor-pointer rounded-lg p-1.5 hover:bg-white/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40">
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+
+        <div className="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-2">
+          <div className="flex min-h-0 flex-col border-b border-slate-200 lg:border-b-0 lg:border-r">
+            <div className="flex flex-wrap gap-1.5 border-b border-slate-100 px-4 py-2.5" aria-label="Giá trị có thể dùng">
+              {keys.map((k) => (
+                <button
+                  key={k}
+                  type="button"
+                  onClick={() => insert(`{{${k}}}`)}
+                  title={`Chèn {{${k}}}`}
+                  className="cursor-pointer rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 font-mono text-[11px] text-slate-600 hover:border-blue-400 hover:text-blue-700"
+                >
+                  {k}
+                </button>
+              ))}
+            </div>
+            <label htmlFor="sap-template" className="sr-only">HTML của giao diện</label>
+            <textarea
+              id="sap-template"
+              ref={area}
+              value={html}
+              onChange={(e) => setHtml(e.target.value)}
+              spellCheck={false}
+              placeholder="Dán HTML vào đây. Lưu ô trống = dùng mẫu gốc."
+              className="min-h-[240px] flex-1 resize-none p-4 font-mono text-[12.5px] leading-relaxed text-slate-800 outline-none"
+            />
+          </div>
+          <div className="min-h-0 overflow-y-auto bg-slate-50 p-4">
+            <div className="mb-2 text-xs font-bold uppercase tracking-wide text-slate-400">
+              Xem trước · {previewEv ? "cuộc gọi đang chọn" : "dữ liệu mẫu"}
+            </div>
+            <TemplateFrame template={html.trim() || STARTER_TEMPLATE} ev={sample} title="Xem trước giao diện" />
           </div>
         </div>
-        {sentiment && <div className="ml-auto"><SentimentGauge value={sentiment} /></div>}
+
+        <div className="flex flex-wrap items-center gap-2 border-t border-slate-200 bg-slate-50 px-5 py-3">
+          <button
+            type="button"
+            onClick={() => confirm("Bỏ giao diện đã chỉnh và quay về mẫu gốc cho mọi màn hình?") && save("")}
+            disabled={saving || !initial.trim()}
+            className="cursor-pointer rounded-lg px-3 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-200 disabled:cursor-default disabled:opacity-40"
+          >
+            Khôi phục mẫu gốc
+          </button>
+          {error && <span className="text-sm text-red-600" role="alert">{error}</span>}
+          <div className="ml-auto flex gap-2">
+            <button type="button" onClick={close} className="cursor-pointer rounded-lg px-4 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-200">
+              Đóng
+            </button>
+            <button
+              type="button"
+              onClick={() => save(html)}
+              disabled={saving || !dirty}
+              className="cursor-pointer rounded-lg bg-blue-700 px-5 py-2 text-sm font-semibold text-white hover:bg-blue-800 disabled:cursor-default disabled:opacity-40"
+            >
+              {saving ? "Đang lưu…" : "Lưu"}
+            </button>
+          </div>
+        </div>
       </div>
-
-      {/* KPI strip */}
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-        <StatCard icon={<FileText className="h-3.5 w-3.5" />} label="Mã cuộc gọi" value={callId} />
-        <StatCard icon={<Hash className="h-3.5 w-3.5" />} label="Số máy nhánh" value={extension} />
-        <StatCard icon={<PhoneCall className="h-3.5 w-3.5" />} label="Số điện thoại" value={phone} />
-        <StatCard icon={<Clock className="h-3.5 w-3.5" />} label="Tiếp nhận" value={timeStr(ev.received_at)} />
-      </div>
-
-      {/* Tóm tắt AI */}
-      <section className="rounded-xl border border-slate-200 bg-white">
-        <header className="flex items-center gap-2 border-b border-slate-100 px-4 py-2.5 text-sm font-bold text-slate-700">
-          <FileText className="h-4 w-4 text-blue-700" /> Tóm tắt hội thoại (AI)
-        </header>
-        {summary ? (
-          <div className="divide-y divide-slate-100">
-            {sections.map((s, i) => {
-              const meta = SECTION_META[s.header];
-              return (
-                <div key={i} className="px-4 py-3">
-                  {s.header && meta && (
-                    <div className={`mb-1.5 flex items-center gap-1.5 border-l-2 pl-2 text-xs font-bold uppercase tracking-wide ${meta.accent}`}>
-                      {meta.icon} {meta.label}
-                    </div>
-                  )}
-                  <ul className="space-y-1">
-                    {s.lines.map((ln, j) => <SummaryLine key={j} text={ln} />)}
-                  </ul>
-                </div>
-              );
-            })}
-          </div>
-        ) : (
-          <p className="px-4 py-6 text-center text-sm text-slate-400">Đang chờ AI sinh tóm tắt…</p>
-        )}
-      </section>
-
-      {/* Transcript một phần */}
-      <section className="rounded-xl border border-slate-200 bg-white">
-        <header className="flex items-center gap-2 border-b border-slate-100 px-4 py-2.5 text-sm font-bold text-slate-700">
-          <MessagesSquare className="h-4 w-4 text-blue-700" /> Transcript một phần
-        </header>
-        {turns.length ? (
-          <div className="max-h-72 space-y-3 overflow-y-auto px-4 py-3">
-            {turns.map((t, i) => (
-              <div key={i} className={`flex items-end gap-2 ${t.isCustomer ? "justify-start" : "flex-row-reverse"}`}>
-                <div
-                  className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[10px] font-bold ${
-                    t.isCustomer ? "bg-slate-200 text-slate-600" : "bg-blue-700 text-white"
-                  }`}
-                  aria-hidden="true"
-                >
-                  {t.isCustomer ? "KH" : "AI"}
-                </div>
-                <div
-                  className={`max-w-[78%] rounded-2xl px-3 py-2 text-sm leading-relaxed ${
-                    t.isCustomer
-                      ? "rounded-bl-sm bg-slate-100 text-slate-800"
-                      : "rounded-br-sm bg-blue-700 text-white"
-                  }`}
-                >
-                  {t.text}
-                </div>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <p className="px-4 py-6 text-center text-sm text-slate-400">Chưa có transcript.</p>
-        )}
-      </section>
-
-      {/* Dữ liệu khác */}
-      {extras.length > 0 && (
-        <section>
-          <h3 className="mb-2 text-xs font-bold uppercase tracking-wide text-slate-400">Dữ liệu khác</h3>
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-            {extras.map(([k, v]) => (
-              <StatCard key={k} icon={<ChevronRight className="h-3.5 w-3.5" />} label={k} value={typeof v === "object" ? JSON.stringify(v) : String(v)} />
-            ))}
-          </div>
-        </section>
-      )}
-
-      <details className="text-xs text-slate-500">
-        <summary className="cursor-pointer select-none rounded px-1 py-0.5 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300">
-          Payload thô (JSON)
-        </summary>
-        <pre className="mt-2 max-h-48 overflow-auto rounded-lg bg-slate-900 p-3 text-[11px] leading-relaxed text-slate-100">
-          {JSON.stringify(ev.payload, null, 2)}
-        </pre>
-      </details>
     </div>
   );
 }
@@ -336,9 +287,26 @@ export default function SapDesk() {
   const [activeId, setActiveId] = useState<string | null>(null);
   const [pop, setPop] = useState<HandoffEvent | null>(null);
   const [answered, setAnswered] = useState<Set<string>>(new Set());
-  const [now, setNow] = useState(() => new Date().toLocaleTimeString("vi-VN"));
   const [menu, setMenu] = useState<{ x: number; y: number; id: string } | null>(null);
+  // Call-detail template shared by every desk ("" = the starter template), and whether its editor is open.
+  const [template, setTemplate] = useState("");
+  const [editing, setEditing] = useState(false);
+  // The gear menu in the header (settings live there, not as loose header buttons).
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const seen = useRef<Set<string>>(new Set());
+
+  // Đóng menu bánh răng khi click ra ngoài / Esc.
+  useEffect(() => {
+    if (!settingsOpen) return;
+    const close = () => setSettingsOpen(false);
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && close();
+    window.addEventListener("click", close);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [settingsOpen]);
 
   // Đóng menu chuột phải khi click ra ngoài / cuộn / Esc.
   useEffect(() => {
@@ -368,12 +336,6 @@ export default function SapDesk() {
     setPop((p) => (p && gone(p.id) ? null : p));
   };
 
-  // Đồng hồ header.
-  useEffect(() => {
-    const t = setInterval(() => setNow(new Date().toLocaleTimeString("vi-VN")), 1000);
-    return () => clearInterval(t);
-  }, []);
-
   // Nạp lịch sử + mở SSE.
   useEffect(() => {
     fetch("/api/handoff/list")
@@ -385,11 +347,16 @@ export default function SapDesk() {
         if (list[0]) setActiveId(list[0].id);
       })
       .catch(() => {});
+    fetch("/api/handoff/template")
+      .then((r) => r.json())
+      .then((d) => setTemplate(typeof d.html === "string" ? d.html : ""))
+      .catch(() => {});
 
     const es = new EventSource("/api/handoff/stream");
     es.onmessage = (msg) => {
       try {
         const data = JSON.parse(msg.data);
+        if (data.type === "template") return setTemplate(typeof data.html === "string" ? data.html : "");
         if (data.type === "deleted") return removeLocal(data.ids || []);
         if (data.type === "cleared") return removeLocal("all");
         const ev: HandoffEvent = data;
@@ -440,7 +407,41 @@ export default function SapDesk() {
           </div>
         </div>
         <div className="flex items-center gap-3 text-xs">
-          <span className="hidden font-mono text-white/70 sm:inline" aria-label="Giờ hiện tại">{now}</span>
+          <div className="relative">
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                setSettingsOpen((o) => !o);
+              }}
+              aria-label="Cài đặt"
+              title="Cài đặt"
+              aria-haspopup="menu"
+              aria-expanded={settingsOpen}
+              className={`inline-flex h-8 w-8 cursor-pointer items-center justify-center rounded-lg text-white/80 hover:bg-white/10 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40 ${settingsOpen ? "bg-white/10 text-white" : ""}`}
+            >
+              <Settings className="h-[18px] w-[18px]" />
+            </button>
+            {settingsOpen && (
+              <div
+                role="menu"
+                onClick={(e) => e.stopPropagation()}
+                className="absolute right-0 top-[calc(100%+6px)] z-40 min-w-[210px] overflow-hidden rounded-lg border border-slate-200 bg-white py-1 text-sm text-slate-700 shadow-lg"
+              >
+                <button
+                  role="menuitem"
+                  type="button"
+                  onClick={() => {
+                    setSettingsOpen(false);
+                    setEditing(true);
+                  }}
+                  className="flex w-full cursor-pointer items-center gap-2 px-3 py-2 text-left hover:bg-slate-100 focus-visible:bg-slate-100 focus-visible:outline-none"
+                >
+                  <Palette className="h-4 w-4 text-slate-500" /> Tùy chỉnh giao diện
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       </header>
 
@@ -528,7 +529,7 @@ export default function SapDesk() {
                   </button>
                 )}
               </div>
-              <HandoffDetail ev={active} />
+              <HandoffDetail ev={active} template={template} />
             </>
           ) : (
             <div className="flex h-full flex-col items-center justify-center gap-3 py-24 text-slate-400">
@@ -568,8 +569,10 @@ export default function SapDesk() {
         </div>
       )}
 
+      {editing && <TemplateEditor initial={template} previewEv={active} onClose={() => setEditing(false)} />}
+
       {/* Screen-pop */}
-      {pop && (
+      {pop && !editing && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-sm"
           role="dialog"
@@ -599,7 +602,7 @@ export default function SapDesk() {
               </button>
             </div>
             <div className="max-h-[70vh] overflow-y-auto p-5">
-              <HandoffDetail ev={pop} />
+              <HandoffDetail ev={pop} template={template} />
             </div>
             <div className="flex items-center justify-end gap-2 border-t border-slate-200 bg-slate-50 px-5 py-3">
               <button

@@ -137,6 +137,56 @@ async def clear_handoffs():
     return {"ok": True}
 
 
+# Giao diện chi tiết cuộc gọi do người dùng tự dán (HTML + CSS + chỗ giữ chỗ {{key}}), dùng chung cho
+# mọi màn hình SAP. Bản demo: ai mở trang cũng sửa được. Frontend escape mọi giá trị và hiển thị
+# trong iframe sandbox không chạy script (frontend/src/handoffTemplate.ts). Rỗng = giao diện mặc định.
+_TEMPLATE_FILE = os.environ.get(
+    "HANDOFF_TEMPLATE_STORE", os.path.join(os.path.dirname(_HANDOFF_FILE), "handoff_template.html"))
+_TEMPLATE_MAX = 200_000
+
+
+def _load_template() -> str:
+    try:
+        with open(_TEMPLATE_FILE, encoding="utf-8") as f:
+            return f.read()
+    except FileNotFoundError:
+        return ""
+
+
+@app.get("/api/handoff/template")
+async def get_handoff_template():
+    """Template giao diện hiện tại ("" = dùng giao diện mặc định)."""
+    return {"html": _load_template()}
+
+
+@app.put("/api/handoff/template")
+async def put_handoff_template(request: Request):
+    """Lưu template ({"html": "..."}); chuỗi rỗng = quay về giao diện mặc định. Báo các màn hình khác qua SSE."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "Body phải là JSON {\"html\": \"...\"}")
+    html = body.get("html") if isinstance(body, dict) else None
+    if not isinstance(html, str):
+        raise HTTPException(400, "Thiếu trường html (chuỗi)")
+    if len(html) > _TEMPLATE_MAX:
+        raise HTTPException(413, f"Template quá dài (tối đa {_TEMPLATE_MAX // 1000} nghìn ký tự)")
+    if html.strip():
+        os.makedirs(os.path.dirname(_TEMPLATE_FILE), exist_ok=True)
+        tmp = _TEMPLATE_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(html)
+        os.replace(tmp, _TEMPLATE_FILE)
+    else:
+        html = ""
+        try:
+            os.remove(_TEMPLATE_FILE)
+        except FileNotFoundError:
+            pass
+    _broadcast({"type": "template", "html": html})
+    return {"ok": True}
+
+
 @app.get("/api/handoff/stream")
 async def stream_handoffs(request: Request):
     """SSE: đẩy handoff mới tới màn hình SAP ngay khi nhận (screen-pop)."""
